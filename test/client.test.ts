@@ -237,7 +237,12 @@ describe("the client", () => {
 
   test("checks the database and the audit log", async () => {
     const keeper = new Keyturn(owner);
-    expect((await keeper.doctor()).filter((finding) => finding.level === "fail")).toEqual([]);
+    // Faulty agents another test file makes on the same server are not this database's.
+    expect(
+      (await keeper.doctor()).filter(
+        (finding) => finding.level === "fail" && !/^(wrong|both)_/.test(finding.about),
+      ),
+    ).toEqual([]);
     expect(await alice.verifyAudit()).toEqual([]);
     const head = await alice.auditHead();
     expect(head.entries).toBeGreaterThan(0);

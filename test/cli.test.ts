@@ -45,6 +45,20 @@ async function keyturn(login: string, args: string[], answers?: string[]) {
   return { code, out: out.join("\n"), err: err.join("\n"), asked };
 }
 
+/**
+ * What the doctor finds wrong here. Logins belong to the whole server, and another test file
+ * makes faulty agents of its own while this one runs: those are another database's business.
+ * The exit code has to agree with everything found, theirs included.
+ */
+async function doctorFailures() {
+  const result = await keyturn(logins.owner, ["doctor", "--json"]);
+  const failures = (JSON.parse(result.out) as { level: string; about: string }[]).filter(
+    (finding) => finding.level === "fail",
+  );
+  expect(result.code).toBe(failures.length > 0 ? 1 : 0);
+  return failures.filter((finding) => !/^(wrong|both)_/.test(finding.about));
+}
+
 const order = async (id: number) =>
   (await owner.query("select * from orders where id = $1", [id])).rows[0];
 
@@ -62,8 +76,7 @@ describe("from the terminal", () => {
     expect(protect.code).toBe(0);
     expect(protect.out).toContain("proposal.orders");
     await owner.query("grant select on orders to keyturn_agent, keyturn_approver");
-    const doctor = await keyturn(logins.owner, ["doctor"]);
-    expect(doctor).toMatchObject({ code: 0, err: "" });
+    expect(await doctorFailures()).toEqual([]);
 
     agent = new Keyturn(await database.as(logins.agent));
     const made = await agent.propose(
@@ -235,7 +248,7 @@ describe("from the terminal", () => {
     expect(doctor.code).toBe(1);
     expect(doctor.out).toContain("fail");
     expect(doctor.out).toContain("fix:");
-    expect((await keyturn(logins.owner, ["doctor", "--json"])).code).toBe(0);
+    expect(await doctorFailures()).toEqual([]);
   });
 
   test("serves the review page until it is told to stop", async () => {

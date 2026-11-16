@@ -1,9 +1,11 @@
+import type { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import pg from "pg";
 import { install, installed, protect, uninstall, unprotect, version } from "./install.ts";
 import { Keyturn, type Queryable, Refused } from "./keyturn.ts";
 import { renderFindings, renderList, renderProposal, type Style } from "./render.ts";
 import { serveReview } from "./review.ts";
+import { serveTools, unfitForAgent } from "./tools.ts";
 
 const usage = `keyturn: PostgreSQL refuses an agent's write until a person approved that exact change.
 
@@ -22,6 +24,10 @@ For an approver
   keyturn reject <proposal>       --reason "..." says why
   keyturn apply <proposal>        Write an approved proposal's changes
   keyturn verify-audit            Check the audit log holds together. Exit 1 if it does not
+
+For an agent
+  keyturn tools                   Serve propose, check and apply as tools over the Model Context Protocol,
+                                  on standard input and output. Connect as the agent's own login
 
 A proposal is named by its id or the start of it.
 
@@ -45,6 +51,9 @@ export interface Io {
   /** Asks the person at the terminal. Absent when there is none. */
   ask?: (question: string) => Promise<string>;
   color: boolean;
+  /** For `keyturn tools`: where its messages come from and go to. Absent: standard input and output. */
+  input?: Readable;
+  output?: Writable;
   /** Resolves when `keyturn review` should close. Absent: when the process is interrupted. */
   until?: () => Promise<void>;
   /** For tests: a connection to use in place of one made from the url. */
@@ -227,6 +236,14 @@ export async function run(argv: string[], io: Io): Promise<number> {
         );
         await (io.until ?? interrupted)();
         await page.close();
+        return 0;
+      }
+      case "tools": {
+        const unfit = await unfitForAgent(db);
+        if (unfit !== null) {
+          throw new Refused(unfit, "42501", null);
+        }
+        await serveTools(db, io.input ?? process.stdin, io.output ?? process.stdout);
         return 0;
       }
       case "verify-audit": {
