@@ -238,6 +238,34 @@ describe("from the terminal", () => {
     expect((await keyturn(logins.owner, ["doctor", "--json"])).code).toBe(0);
   });
 
+  test("serves the review page until it is told to stop", async () => {
+    const out: string[] = [];
+    let page = { status: 0, listed: 0 };
+    const code = await run(["review", "--port", "0"], {
+      env: { KEYTURN_URL: database.url(logins.alice) },
+      out: (text) => out.push(text),
+      err: () => {},
+      color: false,
+      until: async () => {
+        const [address, key] = (
+          /http:\/\/127\.0\.0\.1:\d+\/#\S+/.exec(out.join("\n")) as RegExpExecArray
+        )[0].split("#");
+        const home = await fetch(address as string);
+        const data = await fetch(`${address}api/proposals?show=decided`, {
+          headers: { authorization: `Bearer ${key}` },
+        });
+        page = {
+          status: home.status,
+          listed: ((await data.json()) as { proposals: unknown[] }).proposals.length,
+        };
+      },
+    });
+    expect(code).toBe(0);
+    expect(page.status).toBe(200);
+    expect(page.listed).toBeGreaterThan(2);
+    expect((await keyturn(logins.alice, ["review", "--port", "http"])).code).toBe(2);
+  });
+
   test("never prints the password it connected with", async () => {
     const io: Io = { env: {}, out: () => {}, err: () => {}, color: false };
     const said: string[] = [];

@@ -12,5 +12,6 @@ export {
   Refused,
   type RowDiff,
   type Status,
+  type Step,
   Undecided,
 } from "./keyturn.ts";

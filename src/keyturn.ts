@@ -65,6 +65,14 @@ export interface Extent {
   rows: number;
 }
 
+export interface Step {
+  event: "opened" | "approved" | "approved_by_rule" | "rejected" | "applied" | "stale" | "failed";
+  /** The login that did it. */
+  actor: string;
+  at: Date;
+  detail: Record<string, unknown>;
+}
+
 export interface Finding {
   level: "fail" | "note";
   about: string;
@@ -185,6 +193,14 @@ export class Keyturn {
       row.columns.push(column);
     }
     return result;
+  }
+
+  /** What has happened to a proposal, in order, from the audit log. */
+  async history(id: string): Promise<Step[]> {
+    return this.run<Step>(
+      "select event, actor::text as actor, at, detail from keyturn.audit where proposal_id = $1 order by seq",
+      [id],
+    );
   }
 
   /**

@@ -58,6 +58,9 @@ function value(style: Style, text: string | null, kind: ColumnDiff["beforeKind"]
 
 export function ago(from: Date, to: Date = new Date()): string {
   const seconds = Math.round(Math.abs(to.getTime() - from.getTime()) / 1000);
+  if (seconds < 10) {
+    return "a moment";
+  }
   const [amount, unit] =
     seconds < 90
       ? [seconds, "second"]

@@ -3,6 +3,7 @@ import pg from "pg";
 import { install, installed, protect, uninstall, unprotect, version } from "./install.ts";
 import { Keyturn, type Queryable, Refused } from "./keyturn.ts";
 import { renderFindings, renderList, renderProposal, type Style } from "./render.ts";
+import { serveReview } from "./review.ts";
 
 const usage = `keyturn: PostgreSQL refuses an agent's write until a person approved that exact change.
 
@@ -14,6 +15,7 @@ For the tables' owner
   keyturn uninstall --yes         Remove keyturn, its proposals and its audit log
 
 For an approver
+  keyturn review                  Open a page on this machine to read proposals and decide. --port picks the port
   keyturn list                    Proposals waiting for a decision. --all for the latest in any state
   keyturn show <proposal>         The rows a proposal would change, before and after
   keyturn approve <proposal>      Show it, ask, approve. --apply writes it too
@@ -43,6 +45,8 @@ export interface Io {
   /** Asks the person at the terminal. Absent when there is none. */
   ask?: (question: string) => Promise<string>;
   color: boolean;
+  /** Resolves when `keyturn review` should close. Absent: when the process is interrupted. */
+  until?: () => Promise<void>;
   /** For tests: a connection to use in place of one made from the url. */
   connect?: (url: string | undefined) => Promise<Queryable & { end(): Promise<void> }>;
 }
@@ -212,6 +216,19 @@ export async function run(argv: string[], io: Io): Promise<number> {
         print({ id, outcome }, told(outcome));
         return outcome.status === "applied" ? 0 : 1;
       }
+      case "review": {
+        const port = values.port === undefined ? undefined : Number(values.port);
+        if (port !== undefined && !(Number.isInteger(port) && port >= 0 && port < 65536)) {
+          throw new Usage("--port takes a port number.");
+        }
+        const page = await serveReview(db, port === undefined ? {} : { port });
+        io.out(
+          `The review page is open to this machine only, as the login you connected with:\n\n  ${page.url}\n\nThe address carries a key made for this run. Ctrl-C closes the page.`,
+        );
+        await (io.until ?? interrupted)();
+        await page.close();
+        return 0;
+      }
       case "verify-audit": {
         const [problems, head] = [await keyturn.verifyAudit(), await keyturn.auditHead()];
         print(
@@ -241,6 +258,13 @@ export async function run(argv: string[], io: Io): Promise<number> {
   }
 }
 
+function interrupted(): Promise<void> {
+  return new Promise((resolve) => {
+    process.once("SIGINT", () => resolve());
+    process.once("SIGTERM", () => resolve());
+  });
+}
+
 function told(outcome: { status: string; reason?: string; changes?: number }): string {
   if (outcome.status === "applied") {
     return `Applied: ${outcome.changes ?? 0} row${outcome.changes === 1 ? "" : "s"} written.`;
@@ -254,6 +278,7 @@ function parse(argv: string[]) {
     allowPositionals: true,
     options: {
       url: { type: "string" },
+      port: { type: "string" },
       hash: { type: "string" },
       reason: { type: "string" },
       rows: { type: "string" },
