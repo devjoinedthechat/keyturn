@@ -140,12 +140,10 @@ button {
   display: block;
   width: 100%;
   text-align: left;
-  padding: 12px 20px 12px 21px;
-  border-left: 3px solid transparent;
+  padding: 12px 20px 12px 24px;
 }
 
 .queue button[aria-current="true"] {
-  border-left-color: var(--brass);
   background: var(--sheet);
 }
 
@@ -246,7 +244,6 @@ button {
 .banner {
   margin: 0 0 24px;
   padding: 10px 14px;
-  border-left: 3px solid var(--gone);
   background: var(--gone-wash);
 }
 
@@ -404,12 +401,21 @@ button:disabled {
 
 .key input {
   width: 9ch;
-  padding: 4px 8px;
+  margin-left: 4px;
+  padding: 3px 8px;
   font: 14px var(--mono);
   color: inherit;
   background: var(--sheet);
   border: 1px solid var(--rule);
   border-radius: 6px;
+  vertical-align: baseline;
+}
+
+/* A field already has an edge. Focus colours that edge, and draws no second ring around it. */
+.key input:focus-visible,
+.key textarea:focus-visible {
+  outline-offset: -1px;
+  border-color: var(--brass);
 }
 
 .more .link {
