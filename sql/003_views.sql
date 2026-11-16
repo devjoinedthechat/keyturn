@@ -96,6 +96,7 @@ begin
       values (session_user, left(coalesce(current_setting('keyturn.note', true), ''), 2000), clock_timestamp() + interval '1 day', pg_current_xact_id())
       returning id into proposal;
     raise notice 'keyturn: nothing is written. This is recorded as proposal %, to be approved by someone else.', proposal;
+    perform keyturn.audit_append(proposal, 'opened', '{}');
   end if;
 
   if key <> '{}'::jsonb and exists (select from keyturn.changes c where c.proposal_id = proposal and c.relation = target.relation and c.key = row_.key) then
@@ -206,6 +207,7 @@ create function keyturn.unprotect(p_relation regclass) returns void
   as $$
 declare
   target keyturn.protected;
+  closed record;
 begin
   select * into target from keyturn.protected where relation = p_relation;
   if target.relation is null then
@@ -214,9 +216,15 @@ begin
   if target.view is not null then
     execute format('drop view if exists %s', target.view);
   end if;
-  update keyturn.proposals set status = 'stale', finished_at = clock_timestamp(),
-         outcome = jsonb_build_object('status', 'stale', 'reason', format('%s is no longer under keyturn', p_relation))
-   where status in ('pending', 'approved') and id in (select proposal_id from keyturn.changes where relation = p_relation);
+  for closed in
+    update keyturn.proposals set status = 'stale', finished_at = clock_timestamp(),
+           outcome = jsonb_build_object('status', 'stale', 'reason', format('%s is no longer under keyturn', p_relation))
+     where status in ('pending', 'approved') and id in (select proposal_id from keyturn.changes where relation = p_relation)
+    returning id, outcome
+  loop
+    perform keyturn.audit_append(closed.id, 'stale', closed.outcome);
+  end loop;
+  delete from keyturn.rules where relation = p_relation;
   delete from keyturn.protected where relation = p_relation;
 end $$;
 

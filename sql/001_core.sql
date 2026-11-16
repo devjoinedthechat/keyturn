@@ -23,6 +23,12 @@ begin
   if not exists (select from pg_roles where rolname = 'keyturn_approver') then
     create role keyturn_approver nologin;
   end if;
+  -- Nothing logs in as this one and nothing is granted to it. It is the name on record when
+  -- one of the owner's rules, and no person, let a change through; holding the name keeps a
+  -- login from taking it.
+  if not exists (select from pg_roles where rolname = 'keyturn_rule') then
+    create role keyturn_rule nologin;
+  end if;
 end $$;
 
 -- A table under Keyturn's care. Its shape is remembered, so a proposal made against one
@@ -83,6 +89,153 @@ create table keyturn.changes (
   check ((operation = 'insert') = (before is null)),
   check ((operation = 'delete') = (after is null))
 );
+
+-- What happened to each proposal, in order: opened, approved or rejected, and what became of
+-- it. Written by Keyturn's functions in the same transaction as the thing it records, so
+-- nothing happens without its entry. Each entry carries the hash of the one before it for
+-- the same proposal, so an entry changed or removed afterwards shows.
+create table keyturn.audit (
+  seq         bigint      generated always as identity primary key,
+  proposal_id uuid        not null,
+  at          timestamptz not null default clock_timestamp(),
+  -- The login on the connection.
+  actor       name        not null default session_user,
+  event       text        not null check (event in ('opened', 'approved', 'approved_by_rule', 'rejected', 'applied', 'stale', 'failed')),
+  detail      jsonb       not null default '{}',
+  prev_hash   text        not null,
+  hash        text        not null
+);
+create index audit_by_proposal on keyturn.audit (proposal_id, seq);
+create index audit_let_through on keyturn.audit (at) where event = 'approved_by_rule';
+
+create function keyturn.refuse_change() returns trigger
+  language plpgsql
+  as $$ begin raise exception 'keyturn: the audit log is never changed or emptied'; end $$;
+create trigger audit_is_append_only before update or delete on keyturn.audit for each row execute function keyturn.refuse_change();
+create trigger audit_is_not_emptied before truncate on keyturn.audit execute function keyturn.refuse_change();
+
+create function keyturn.audit_hash(p_prev text, p_proposal uuid, p_at timestamptz, p_actor name, p_event text, p_detail jsonb) returns text
+  language sql immutable
+  set search_path = pg_catalog
+  as $$
+    select encode(sha256(convert_to(p_prev || '|' || p_proposal || '|' || to_char(p_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US')
+             || '|' || p_actor || '|' || p_event || '|' || p_detail::text, 'UTF8')), 'hex')
+  $$;
+
+-- Adds an entry. Called only by Keyturn's own functions, which hold the proposal's row
+-- while they do, so a proposal's entries have one order.
+create function keyturn.audit_append(p_proposal uuid, p_event text, p_detail jsonb default '{}') returns void
+  language plpgsql
+  set search_path = pg_catalog
+  as $$
+declare
+  previous text;
+  moment   timestamptz := clock_timestamp();
+begin
+  select hash into previous from keyturn.audit where proposal_id = p_proposal order by seq desc limit 1;
+  previous := coalesce(previous, '');
+  insert into keyturn.audit (proposal_id, at, event, detail, prev_hash, hash)
+    values (p_proposal, moment, p_event, coalesce(p_detail, '{}'), previous,
+            keyturn.audit_hash(previous, p_proposal, moment, session_user, p_event, coalesce(p_detail, '{}')));
+end $$;
+
+-- Rules for changes that need no person. There are none unless the tables' owner writes
+-- one, and a change no rule covers waits for a person, as every change does by default.
+--
+-- A rule covers a change when the table and the operation are the rule's, an update sets
+-- only columns the rule lists, and the rule's condition, if it has one, holds for the row
+-- as it is ("before") and as it would be ("after"). A proposal is let through only when
+-- every change in it is covered, it holds no more rows than the rules that cover it allow,
+-- and none of those rules has already let through as many proposals as it may in an hour.
+create table keyturn.rules (
+  name       text        primary key check (name ~ '^[a-z][a-z0-9_]{0,62}$'),
+  relation   regclass    not null,
+  operations text[]      not null check (operations <@ array['insert', 'update', 'delete'] and cardinality(operations) > 0),
+  -- For updates and inserts: the only columns that may be set. Null allows none, so a rule for updates or inserts must list them.
+  columns    text[],
+  max_rows   integer     not null default 1 check (max_rows between 1 and 10000),
+  -- How many proposals the rule lets through in any hour. One row at a time is still every row, given enough proposals.
+  per_hour   integer     not null default 60 check (per_hour between 1 and 100000),
+  -- SQL that gives true or false, over two jsonb values named before and after.
+  condition  text,
+  active     boolean     not null default true,
+  version    integer     not null default 1,
+  written_by name        not null default session_user,
+  written_at timestamptz not null default clock_timestamp()
+);
+
+-- The rules that together cover a proposal, or null when some change is covered by none.
+create function keyturn.rules_covering(p_proposal_id uuid) returns jsonb
+  language plpgsql stable
+  set search_path = pg_catalog
+  as $$
+declare
+  change  keyturn.changes;
+  rule    keyturn.rules;
+  holds   boolean;
+  found   boolean;
+  used    jsonb := '{}';
+  total   integer;
+begin
+  select count(*) into total from keyturn.changes where proposal_id = p_proposal_id;
+  for change in select * from keyturn.changes where proposal_id = p_proposal_id order by seq loop
+    found := false;
+    for rule in select * from keyturn.rules where active and relation = change.relation and change.operation = any (operations) and max_rows >= total order by name loop
+      if change.operation <> 'delete' and not (change.columns <@ coalesce(rule.columns, '{}')) then
+        continue;
+      end if;
+      if rule.condition is not null then
+        begin
+          execute format('select (%s) from (select $1 as before, $2 as after) as change', rule.condition) into holds using change.before, change.after;
+        exception when others then
+          -- A condition that cannot be worked out for this row does not hold for it.
+          holds := false;
+        end;
+        if holds is not true then
+          continue;
+        end if;
+      end if;
+      found := true;
+      used := used || jsonb_build_object(rule.name, rule.version);
+      exit;
+    end loop;
+    if not found then
+      return null;
+    end if;
+  end loop;
+  return case when total > 0 then used end;
+end $$;
+
+-- Writes a rule, or replaces one of the same name with the next version. For the tables' owner.
+create function keyturn.allow(p_name text, p_relation regclass, p_operations text[], p_columns text[] default null,
+                              p_max_rows integer default 1, p_condition text default null, p_per_hour integer default 60) returns void
+  language plpgsql
+  set search_path = pg_catalog
+  as $$
+declare
+  unknown text;
+begin
+  if not exists (select from keyturn.protected where relation = p_relation) then
+    raise exception 'keyturn: % is not a table under keyturn', p_relation;
+  end if;
+  select name into unknown from unnest(coalesce(p_columns, '{}')) as name
+   where not exists (select from pg_attribute where attrelid = p_relation and attname = name and attnum > 0 and not attisdropped);
+  if unknown is not null then
+    raise exception 'keyturn: % has no column "%"', p_relation, unknown;
+  end if;
+  if p_operations && array['insert', 'update'] and coalesce(cardinality(p_columns), 0) = 0 then
+    raise exception 'keyturn: a rule for inserts or updates lists the columns that may be set';
+  end if;
+  if p_condition is not null then
+    -- Tried once on an empty row, so that a condition that is not SQL is refused when it is written and not when it is needed.
+    execute format('select (%s)::boolean from (select $1 as before, $2 as after) as change', p_condition) using '{}'::jsonb, '{}'::jsonb;
+  end if;
+  insert into keyturn.rules (name, relation, operations, columns, max_rows, condition, per_hour)
+    values (p_name, p_relation, p_operations, p_columns, p_max_rows, p_condition, p_per_hour)
+    on conflict (name) do update
+      set relation = excluded.relation, operations = excluded.operations, columns = excluded.columns, max_rows = excluded.max_rows,
+          condition = excluded.condition, per_hour = excluded.per_hour, active = true, version = keyturn.rules.version + 1, written_by = session_user, written_at = clock_timestamp();
+end $$;
 
 -- ---------------------------------------------------------------- how a row is written down
 
@@ -278,6 +431,7 @@ begin
       values (proposal, seq, target.relation, target.shape, operation, key, before, after, columns);
   end loop;
 
+  perform keyturn.audit_append(proposal, 'opened', jsonb_build_object('changes', seq));
   return query select proposal, keyturn.hash_of(proposal);
 end $$;
 
@@ -379,6 +533,7 @@ begin
   end if;
   update keyturn.proposals set status = 'approved', content_hash = p_content_hash, decided_by = session_user, decided_at = clock_timestamp()
    where id = p_proposal_id;
+  perform keyturn.audit_append(p_proposal_id, 'approved', jsonb_build_object('content_hash', p_content_hash));
 end $$;
 
 create function keyturn.reject(p_proposal_id uuid, p_reason text default null) returns void
@@ -403,6 +558,7 @@ begin
   end if;
   update keyturn.proposals set status = 'rejected', decided_by = session_user, decided_at = clock_timestamp(), reason = p_reason
    where id = p_proposal_id;
+  perform keyturn.audit_append(p_proposal_id, 'rejected', jsonb_strip_nulls(jsonb_build_object('reason', p_reason)));
 end $$;
 
 -- ---------------------------------------------------------------- applying
@@ -428,6 +584,8 @@ declare
   written  jsonb;
   touched  bigint;
   result   jsonb;
+  covered  jsonb;
+  rule     keyturn.rules;
 begin
   if not (keyturn.caller_is('keyturn_agent') or keyturn.caller_is('keyturn_approver')) then
     raise exception 'keyturn: % may not use keyturn', session_user using errcode = 'insufficient_privilege';
@@ -441,11 +599,29 @@ begin
   if proposal.status in ('applied', 'stale', 'failed') then
     return proposal.outcome;
   end if;
-  if proposal.status <> 'approved' then
-    raise exception 'keyturn: the proposal is %, not approved', proposal.status using errcode = 'insufficient_privilege';
-  end if;
   if proposal.expires_at <= clock_timestamp() then
     raise exception 'keyturn: the proposal expired at %', proposal.expires_at;
+  end if;
+  -- Nobody has decided. If the owner's rules cover every change in it, they decide, and it is on record that they did.
+  if proposal.status = 'pending' then
+    covered := keyturn.rules_covering(p_proposal_id);
+    for rule in select r.* from keyturn.rules r where covered ? r.name order by r.name for update loop
+      -- Holding the rule's row makes two proposals under one rule count one after the other.
+      select count(*) into touched from keyturn.audit
+       where event = 'approved_by_rule' and at > clock_timestamp() - interval '1 hour' and detail -> 'rules' ? rule.name;
+      if touched >= rule.per_hour then
+        raise exception 'keyturn: the rule % has let % proposals through in the last hour, which is all it may; this one waits for a person', rule.name, touched
+          using errcode = 'insufficient_privilege';
+      end if;
+    end loop;
+    if covered is not null then
+      update keyturn.proposals set status = 'approved', content_hash = keyturn.hash_of(p_proposal_id), decided_by = 'keyturn_rule', decided_at = clock_timestamp()
+       where id = p_proposal_id returning * into proposal;
+      perform keyturn.audit_append(p_proposal_id, 'approved_by_rule', jsonb_build_object('rules', covered, 'content_hash', proposal.content_hash));
+    end if;
+  end if;
+  if proposal.status <> 'approved' then
+    raise exception 'keyturn: the proposal is %, not approved', proposal.status using errcode = 'insufficient_privilege';
   end if;
   if proposal.content_hash is distinct from keyturn.hash_of(p_proposal_id) then
     raise exception 'keyturn: the proposal is not what was approved';
@@ -472,6 +648,7 @@ begin
 
   if result is not null then
     update keyturn.proposals set status = 'stale', outcome = result, finished_at = clock_timestamp() where id = p_proposal_id;
+    perform keyturn.audit_append(p_proposal_id, 'stale', result);
     return result;
   end if;
 
@@ -510,13 +687,58 @@ begin
   exception when others then
     result := jsonb_build_object('status', 'failed', 'reason', sqlerrm);
     update keyturn.proposals set status = 'failed', outcome = result, finished_at = clock_timestamp() where id = p_proposal_id;
+    perform keyturn.audit_append(p_proposal_id, 'failed', result);
     return result;
   end;
 
   result := jsonb_build_object('status', 'applied', 'changes', (select count(*) from keyturn.changes where proposal_id = p_proposal_id));
   update keyturn.proposals set status = 'applied', outcome = result, finished_at = clock_timestamp() where id = p_proposal_id;
+  perform keyturn.audit_append(p_proposal_id, 'applied', result);
   return result;
 end $$;
+
+-- Checks the audit log. Gives a row for each thing that does not fit: an entry whose hash is
+-- not the hash of what it says, an entry that does not follow the one before it, or a
+-- proposal whose last entry is not where the proposal now stands.
+create function keyturn.verify_audit() returns table (proposal_id uuid, problem text)
+  language plpgsql stable
+  set search_path = pg_catalog
+  as $$
+declare
+  entry    keyturn.audit;
+  previous text;
+  current_ uuid;
+begin
+  for entry in select * from keyturn.audit order by audit.proposal_id, seq loop
+    if current_ is distinct from entry.proposal_id then
+      current_ := entry.proposal_id;
+      previous := '';
+    end if;
+    if entry.prev_hash <> previous then
+      return query select entry.proposal_id, format('entry %s does not follow the entry before it', entry.seq);
+    elsif entry.hash <> keyturn.audit_hash(entry.prev_hash, entry.proposal_id, entry.at, entry.actor, entry.event, entry.detail) then
+      return query select entry.proposal_id, format('entry %s has been changed', entry.seq);
+    end if;
+    previous := entry.hash;
+  end loop;
+
+  return query
+    select p.id, format('the proposal is %s and its last entry says %s', p.status, coalesce(last.event, 'nothing'))
+      from keyturn.proposals p
+      left join lateral (select event from keyturn.audit a where a.proposal_id = p.id order by seq desc limit 1) last on true
+     where coalesce(last.event, '') <> case p.status when 'pending' then 'opened' when 'approved' then last.event else p.status end
+        or (p.status = 'approved' and coalesce(last.event, '') not in ('approved', 'approved_by_rule'));
+end $$;
+
+-- One value for the whole log as it stands. Kept somewhere the database's owner cannot
+-- reach, it shows later whether entries were rewritten or removed by someone who could
+-- switch the log's own guards off.
+create function keyturn.audit_head() returns table (entries bigint, head text)
+  language sql stable
+  set search_path = pg_catalog
+  as $$
+    select count(*), encode(sha256(convert_to(coalesce(string_agg(hash, '' order by seq), ''), 'UTF8')), 'hex') from keyturn.audit
+  $$;
 
 -- ---------------------------------------------------------------- who may see what
 
@@ -531,6 +753,12 @@ create policy own_or_approver on keyturn.changes for select
   using (pg_has_role(session_user, 'keyturn_approver', 'MEMBER')
          or exists (select from keyturn.proposals where proposals.id = changes.proposal_id and proposals.proposed_by = session_user));
 
+-- The audit log is read the way proposals are: an agent its own, an approver all of it.
+alter table keyturn.audit enable row level security;
+create policy own_or_approver on keyturn.audit for select
+  using (pg_has_role(session_user, 'keyturn_approver', 'MEMBER')
+         or exists (select from keyturn.proposals where proposals.id = audit.proposal_id and proposals.proposed_by = session_user));
+
 -- ---------------------------------------------------------------- who may do what
 
 revoke all on schema keyturn from public;
@@ -539,8 +767,11 @@ revoke all on all functions in schema keyturn from public;
 
 grant usage on schema keyturn to keyturn_agent, keyturn_approver;
 -- Both may read proposals and their changes. Neither may write them: only the functions do.
-grant select on keyturn.proposals, keyturn.changes, keyturn.protected to keyturn_agent, keyturn_approver;
+grant select on keyturn.proposals, keyturn.changes, keyturn.protected, keyturn.audit to keyturn_agent, keyturn_approver;
+-- An approver may read the rules: they decide what never reaches an approver.
+grant select on keyturn.rules to keyturn_approver;
 grant execute on function keyturn.propose(jsonb, text, interval), keyturn.record_proposal(jsonb, text, interval) to keyturn_agent;
 grant execute on function keyturn.apply(uuid) to keyturn_agent, keyturn_approver;
 grant execute on function keyturn.approve(uuid, text), keyturn.reject(uuid, text) to keyturn_approver;
+grant execute on function keyturn.verify_audit(), keyturn.audit_head(), keyturn.audit_hash(text, uuid, timestamptz, name, text, jsonb) to keyturn_approver;
 grant execute on function keyturn.hash_of(uuid), keyturn.caller_is(name), keyturn.shape_of(regclass), keyturn.key_condition(regclass, text[]), keyturn.image(text[]) to keyturn_agent, keyturn_approver;

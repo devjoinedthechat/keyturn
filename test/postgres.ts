@@ -35,6 +35,7 @@ export default async function setup(project: TestProject) {
   await admin.query(`
     create role keyturn_agent nologin;
     create role keyturn_approver nologin;
+    create role keyturn_rule nologin;
     create role ${logins.owner} login createdb password '${password}';
     create role ${logins.agent} login password '${password}' in role keyturn_agent;
     create role ${logins.otherAgent} login password '${password}' in role keyturn_agent;

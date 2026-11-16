@@ -104,6 +104,27 @@ begin
     end if;
   end loop;
 
+  for target in select r.name, r.relation::text as relation, r.operations, r.columns, r.max_rows, r.per_hour, r.condition is not null as conditional
+                  from keyturn.rules r where r.active order by 1 loop
+    return query select 'note', target.relation,
+      format('the rule %s lets an agent %s%s with no person, up to %s rows a proposal and %s proposals an hour%s', target.name,
+             array_to_string(target.operations, ', '), coalesce(' (' || array_to_string(target.columns, ', ') || ')', ''), target.max_rows, target.per_hour,
+             case when target.conditional then ', under a condition' else '' end),
+      format('update keyturn.rules set active = false where name = %L', target.name);
+  end loop;
+
+  if (select count(*) from pg_trigger where tgrelid = 'keyturn.audit'::regclass and tgname in ('audit_is_append_only', 'audit_is_not_emptied') and tgenabled in ('O', 'A')) < 2 then
+    return query select 'fail', 'keyturn.audit', 'can be changed or emptied: the triggers that guard the audit log are missing or switched off',
+      'alter table keyturn.audit enable trigger all'::text;
+  end if;
+  if exists (select from keyturn.verify_audit()) then
+    return query select 'fail', 'keyturn.audit', 'does not hold together: entries were changed or removed, or a proposal moved without one', 'select * from keyturn.verify_audit()'::text;
+  end if;
+  if exists (select from pg_roles where rolname = 'keyturn_rule' and (rolcanlogin or rolsuper))
+     or exists (select from pg_auth_members m where m.roleid = 'keyturn_rule'::regrole or m.member = 'keyturn_rule'::regrole) then
+    return query select 'fail', 'keyturn_rule', 'is the name on record for a change no person approved, and here something can act as it', 'alter role keyturn_rule nologin nosuperuser, and revoke its memberships'::text;
+  end if;
+
   if not exists (select from pg_roles where pg_has_role(oid, 'keyturn_approver', 'MEMBER') and rolcanlogin) then
     return query select 'note', 'keyturn_approver', 'has no login in it, so nothing can be approved', 'grant keyturn_approver to a login that is not an agent';
   end if;
