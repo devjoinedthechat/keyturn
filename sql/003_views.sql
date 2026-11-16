@@ -26,6 +26,8 @@ alter table keyturn.protected add column view regclass;
 -- Set for a proposal that is being put together by statements against the views: the
 -- transaction it belongs to. Changes are added to it only from inside that transaction.
 alter table keyturn.proposals add column transaction xid8;
+-- A view belongs to one table, and the trigger on it finds that table by it, once a row.
+create unique index protected_by_view on keyturn.protected (view) where view is not null;
 create index proposals_in_transaction on keyturn.proposals (proposed_by, transaction) where transaction is not null;
 
 -- Runs once for each row a statement against a view would have changed. Records the row and
@@ -33,6 +35,12 @@ create index proposals_in_transaction on keyturn.proposals (proposed_by, transac
 create function keyturn.capture() returns trigger
   language plpgsql security definer
   set search_path = pg_catalog
+  -- This runs once a row, and looks its proposal's rows up each time. A plan made while the
+  -- table looked empty would read all of them every time: ten thousand rows, a hundred
+  -- million reads. Every lookup here has an index, and this has the planner use it.
+  set enable_seqscan = off
+  -- Compiling a query that reads one row costs many times what the query does.
+  set jit = off
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex'
   as $$
@@ -99,12 +107,12 @@ begin
     perform keyturn.audit_append(proposal, 'opened', '{}');
   end if;
 
-  if key <> '{}'::jsonb and exists (select from keyturn.changes c where c.proposal_id = proposal and c.relation = target.relation and c.key = row_.key) then
+  if key <> '{}'::jsonb and exists (select from keyturn.changes c where c.proposal_id = proposal and c.relation = target.relation and c.key = row_.key and c.key <> '{}'::jsonb) then
     raise exception 'keyturn: the row % of % already has a change in this proposal', key, target.relation;
   end if;
   select coalesce(max(c.seq), 0) + 1 into seq from keyturn.changes c where c.proposal_id = proposal;
   if seq > 10000 then
-    raise exception 'keyturn: a proposal holds at most 10000 changes';
+    raise exception 'keyturn: a proposal holds at most 10000 changes, and this reaches more. Nothing is recorded. Narrow the statement, or make the change in parts';
   end if;
 
   insert into keyturn.changes (proposal_id, seq, relation, shape, operation, key, before, after, columns)
@@ -175,8 +183,11 @@ begin
 
   update keyturn.protected set view = null where relation = p_relation;
   execute format('drop view if exists proposal.%I', view_name);
-  -- "offset 0" changes no row and makes the view one PostgreSQL will not write through by itself.
-  execute format('create view proposal.%I with (security_invoker = true) as select * from %s offset 0', view_name, p_relation);
+  -- Written with a WITH clause, which changes no row and makes the view one PostgreSQL will
+  -- not write through by itself: were the trigger ever missing, a write would have nowhere
+  -- to go. Unlike "offset 0", it leaves the planner free to use the table's indexes, so a
+  -- statement that names one row reads one row.
+  execute format('create view proposal.%I with (security_invoker = true) as with rows as (select * from %s) select * from rows', view_name, p_relation);
   execute format('create trigger capture instead of insert or update or delete on proposal.%I for each row execute function keyturn.capture()', view_name);
   execute format('grant select, insert, update, delete on proposal.%I to keyturn_agent', view_name);
   update keyturn.protected set view = format('proposal.%I', view_name)::regclass where relation = p_relation;

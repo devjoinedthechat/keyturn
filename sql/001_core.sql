@@ -13,6 +13,14 @@
 --
 -- Both are groups. A login is put in one of them, never in both.
 
+do $$
+begin
+  -- The proposal views run with the caller's rights (security_invoker), which came with PostgreSQL 15.
+  if current_setting('server_version_num')::integer < 150000 then
+    raise exception 'keyturn needs PostgreSQL 15 or later; this is %', current_setting('server_version');
+  end if;
+end $$;
+
 create schema keyturn;
 
 do $$
@@ -89,6 +97,12 @@ create table keyturn.changes (
   check ((operation = 'insert') = (before is null)),
   check ((operation = 'delete') = (after is null))
 );
+-- One change to a row in one proposal: a second would be approved against a row the first
+-- had already altered. The functions say so in words; this makes it so, and makes the check
+-- quick in a proposal of thousands of rows. An insert that leaves its key to a default has
+-- no key yet, and is not counted.
+create unique index one_change_per_row on keyturn.changes (proposal_id, relation, key) where key <> '{}'::jsonb;
+
 
 -- What happened to each proposal, in order: opened, approved or rejected, and what became of
 -- it. Written by Keyturn's functions in the same transaction as the thing it records, so
@@ -319,6 +333,11 @@ create function keyturn.record_proposal(p_changes jsonb, p_note text, p_valid_fo
   set search_path = pg_catalog
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex'
+  -- Each change looks up the proposal's earlier ones. Every such lookup has an index, and
+  -- this has the planner use it even while the table's statistics say it is empty.
+  set enable_seqscan = off
+  -- Compiling a query that reads one row costs many times what the query does.
+  set jit = off
   as $$
 <<given_>>
 declare
@@ -423,7 +442,7 @@ begin
     end if;
 
     -- One change to a row in one proposal. A second would be approved against a row the first has already altered.
-    if key <> '{}'::jsonb and exists (select from keyturn.changes c where c.proposal_id = proposal and c.relation = target.relation and c.key = given_.key) then
+    if key <> '{}'::jsonb and exists (select from keyturn.changes c where c.proposal_id = proposal and c.relation = target.relation and c.key = given_.key and c.key <> '{}'::jsonb) then
       raise exception 'keyturn: change %: the row % of % already has a change in this proposal', seq, key, target.relation;
     end if;
 
@@ -452,7 +471,8 @@ declare
   position bigint;
   target   keyturn.protected;
   seen     jsonb;
-  named    jsonb := '[]'::jsonb;
+  -- An array, added to in place. A jsonb list joined to itself row by row is copied whole each time.
+  named    jsonb[] := '{}';
 begin
   if jsonb_typeof(p_changes) is distinct from 'array' then
     return query select * from keyturn.record_proposal(p_changes, p_note, p_valid_for);
@@ -473,9 +493,9 @@ begin
         change := change || jsonb_build_object('seen', seen);
       end if;
     end if;
-    named := named || jsonb_build_array(change);
+    named := array_append(named, change);
   end loop;
-  return query select * from keyturn.record_proposal(named, p_note, p_valid_for);
+  return query select * from keyturn.record_proposal(to_jsonb(named), p_note, p_valid_for);
 end $$;
 
 -- The hash of a proposal's content: every change, in order, with the note. jsonb writes its
@@ -574,6 +594,8 @@ create function keyturn.apply(p_proposal_id uuid) returns jsonb
   set search_path = pg_catalog
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex'
+  -- Each change is a query for one row. Compiling those costs many times what they do.
+  set jit = off
   as $$
 declare
   proposal keyturn.proposals;

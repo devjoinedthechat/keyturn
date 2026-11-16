@@ -126,7 +126,7 @@ test("a write granted to everyone is reported for every agent", async () => {
 test("a role the agent could switch to, which can write, is reported even though the agent inherits nothing from it", async () => {
   await withAgent(
     (role) =>
-      `create role writer_${role} nologin; grant update on ledger to writer_${role}; grant writer_${role} to ${role} with inherit false`,
+      `create role writer_${role} nologin; grant update on ledger to writer_${role}; alter role ${role} noinherit; grant writer_${role} to ${role}`,
     async (role) => {
       // has_table_privilege says no: nothing is inherited. SET ROLE would get there all the same.
       expect(

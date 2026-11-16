@@ -17,7 +17,7 @@
     "dist",
     "sql",
     "review",
-    "docs",
+    "docs/*.md",
     "LICENSE"
   ],
   "packageManager": "pnpm@11.28.11",
@@ -30,8 +30,12 @@
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit -p .",
     "test": "vitest run",
-    "check": "pnpm lint && pnpm typecheck && pnpm test",
-    "keyturn": "node src/bin.ts"
+    "check": "pnpm check:secrets && pnpm lint && pnpm typecheck && pnpm test",
+    "keyturn": "node src/bin.ts",
+    "bench": "node bench/overhead.ts",
+    "check:secrets": "scripts/check-secrets.sh --all",
+    "prepare": "git config core.hooksPath .githooks || true",
+    "demo": "node demo/run.ts"
   },
   "dependencies": {
     "pg": "8.23.1"
