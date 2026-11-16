@@ -97,13 +97,14 @@ npx keyturn doctor
 
 ## For the agent
 
-An agent proposes in whichever way suits it. All four end in the same proposal.
+An agent proposes in whichever way suits it. All five end in the same proposal.
 
 | Way          | How                                                                                                      |
 | ------------ | -------------------------------------------------------------------------------------------------------- |
 | Ordinary SQL | `update proposal.orders set status = 'refunded' where id = 7`                                            |
 | A function   | `select * from keyturn.propose('[{"table": "orders", "operation": "delete", "key": {"id": 7}}]', 'Why')` |
 | TypeScript   | `await new Keyturn(client).propose([...], { note: "Why" })`                                              |
+| Python       | `Keyturn(connection).propose([...], note="Why")`, from [python/](python/README.md)                       |
 | Tools        | `keyturn tools` serves propose, check and apply over the Model Context Protocol                          |
 
 Through a view, the statements of one transaction become one proposal, and each reports zero rows changed.

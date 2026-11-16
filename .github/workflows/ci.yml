@@ -59,3 +59,20 @@ jobs:
       - run: pnpm test
         env:
           POSTGRES_IMAGE: postgres:${{ matrix.postgres }}
+
+  python:
+    name: Python client
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Installed by version from the package index, so no further action has to be trusted.
+      - run: python3 -m pip install --user uv==0.12.16
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest -q

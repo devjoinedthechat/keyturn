@@ -18,6 +18,7 @@ Tests need Docker. Each run starts one PostgreSQL container; each test file work
 | `src/`    | The TypeScript client, the command line, the review page's server, the tool server |
 | `review/` | The review page: one HTML file, one stylesheet, one script, no build step          |
 | `test/`   | Tests, against real PostgreSQL                                                     |
+| `python/` | The Python client and its tests, run with `uv`                                     |
 
 ## Rules for changes
 
