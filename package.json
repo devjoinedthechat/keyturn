@@ -1,19 +1,36 @@
 {
   "name": "keyturn",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "PostgreSQL refuses an AI agent's write until a person has approved that exact change.",
   "license": "MIT",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "keyturn": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "sql",
+    "docs",
+    "LICENSE"
+  ],
   "packageManager": "pnpm@11.28.11",
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit -p .",
     "test": "vitest run",
-    "check": "pnpm lint && pnpm typecheck && pnpm test"
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "keyturn": "node src/bin.ts"
   },
   "dependencies": {
     "pg": "8.23.1"
@@ -27,5 +44,13 @@
     "testcontainers": "12.2.1",
     "typescript": "7.0.2",
     "vitest": "5.1.0"
-  }
+  },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "ai-agents",
+    "human-in-the-loop",
+    "approval",
+    "audit"
+  ]
 }

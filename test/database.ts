@@ -6,12 +6,26 @@ import { logins, password } from "./postgres.ts";
 
 export { logins };
 
-/** A database of its own for one test file, with Keyturn installed by the owner and one table to protect. */
+/** A database of its own for one test file. */
 export class Database {
   readonly name = `t_${randomBytes(6).toString("hex")}`;
   private readonly clients: pg.Client[] = [];
 
+  /** A database with Keyturn installed by the owner, and the tables in `schema`. */
   static async create(schema: string): Promise<Database> {
+    const database = await Database.bare();
+    const installer = await database.as(logins.owner);
+    for (const file of (await readdir(new URL("../sql/", import.meta.url)))
+      .filter((name) => name.endsWith(".sql"))
+      .sort()) {
+      await installer.query(await readFile(new URL(`../sql/${file}`, import.meta.url), "utf8"));
+    }
+    await installer.query(schema);
+    return database;
+  }
+
+  /** A database with nothing in it, owned by the owner. */
+  static async bare(): Promise<Database> {
     const database = new Database();
     const server = inject("postgres");
     const owner = new pg.Client({
@@ -24,15 +38,13 @@ export class Database {
     await owner.connect();
     await owner.query(`create database ${database.name}`);
     await owner.end();
-
-    const installer = await database.as(logins.owner);
-    for (const file of (await readdir(new URL("../sql/", import.meta.url)))
-      .filter((name) => name.endsWith(".sql"))
-      .sort()) {
-      await installer.query(await readFile(new URL(`../sql/${file}`, import.meta.url), "utf8"));
-    }
-    await installer.query(schema);
     return database;
+  }
+
+  /** Where one login connects. */
+  url(login: string): string {
+    const server = inject("postgres");
+    return `postgres://${login}:${password}@${server.host}:${server.port}/${this.name}`;
   }
 
   /** A connection as one login. Closed with the database. */
