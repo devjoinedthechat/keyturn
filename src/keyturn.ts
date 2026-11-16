@@ -55,7 +55,8 @@ export interface RowDiff {
   seq: number;
   table: string;
   operation: "insert" | "update" | "delete";
-  key: Record<string, unknown>;
+  /** The row's primary key, each part as PostgreSQL writes it: text, so a large number keeps every digit. */
+  key: Record<string, string | null>;
   columns: ColumnDiff[];
 }
 
@@ -83,10 +84,10 @@ export interface Finding {
 /** The database said no. `message` is what it said, without the `keyturn:` it starts with. */
 export class Refused extends Error {
   override readonly name = "Refused";
-  /** The PostgreSQL error code. `42501` when the caller may not do this. */
-  readonly code: string;
+  /** The PostgreSQL error code: `42501` when the caller may not do this. Null when it was found without asking the database. */
+  readonly code: string | null;
 
-  constructor(message: string, code: string, cause: unknown) {
+  constructor(message: string, code: string | null, cause?: unknown) {
     super(message, { cause });
     this.code = code;
   }
@@ -170,7 +171,7 @@ export class Keyturn {
       seq: number;
       table: string;
       operation: RowDiff["operation"];
-      key: Record<string, unknown>;
+      key: Record<string, string | null>;
       column: string;
       before: string | null;
       after: string | null;
@@ -178,9 +179,11 @@ export class Keyturn {
       afterKind: Kind;
       changed: boolean;
     }>(
-      `select seq, relation as "table", operation, key, column_name as "column", before, after,
+      `select seq, relation as "table", operation,
+              (select jsonb_object_agg(part.key, part.value #>> '{}') from jsonb_each(d.key) as part) as key,
+              column_name as "column", before, after,
               before_kind as "beforeKind", after_kind as "afterKind", changed
-         from keyturn.diff($1, $2, $3)`,
+         from keyturn.diff($1, $2, $3) as d`,
       [id, options.from ?? 1, options.count ?? 100],
     );
     const result: RowDiff[] = [];
@@ -238,7 +241,7 @@ export class Keyturn {
       options.signal?.throwIfAborted();
       const proposal = await this.proposal(id);
       if (proposal === null) {
-        throw new Refused(`there is no proposal ${id} that this login can see`, "02000", undefined);
+        throw new Refused(`there is no proposal ${id} that this login can see`, null);
       }
       if (proposal.status !== "pending") {
         return proposal;
@@ -249,7 +252,7 @@ export class Keyturn {
       if (until !== undefined && Date.now() + every > until) {
         throw new Undecided(`nobody has decided proposal ${id} yet`);
       }
-      await new Promise((resolve) => setTimeout(resolve, every));
+      await pause(every, options.signal);
     }
   }
 
@@ -293,4 +296,19 @@ export function refusalOf(error: unknown): Refused | null {
     return new Refused(message.slice("keyturn: ".length), code, error);
   }
   return code === "42501" ? new Refused(message, code, error) : null;
+}
+
+/** Waits, and stops waiting at once when told to. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const stop = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error("aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", stop);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", stop, { once: true });
+  });
 }

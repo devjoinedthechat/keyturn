@@ -45,8 +45,8 @@ body {
 
 body {
   margin: 0;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
+  display: flex;
+  flex-direction: column;
   background: var(--paper);
   color: var(--ink);
   font: 15px / 1.5 var(--sans);
@@ -105,7 +105,20 @@ button {
   border-bottom-color: var(--brass);
 }
 
+.lost {
+  margin: 0;
+  padding: 10px 24px;
+  background: var(--gone-wash);
+  color: var(--gone);
+  border-bottom: 1px solid var(--rule);
+}
+
+.lost[hidden] {
+  display: none;
+}
+
 .frame {
+  flex: 1;
   display: grid;
   grid-template-columns: minmax(230px, 300px) 1fr;
   min-height: 0;
@@ -269,6 +282,10 @@ table {
   font: 13px / 1.45 var(--mono);
 }
 
+td {
+  white-space: pre-wrap;
+}
+
 td,
 th {
   text-align: left;
@@ -291,8 +308,6 @@ th {
   color: var(--gone);
   background: var(--gone-wash);
   padding-left: 6px;
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--gone) 55%, transparent);
 }
 
 .pairs .now {
@@ -338,11 +353,6 @@ th {
   color: var(--gone);
 }
 
-.grid.delete tr > td:not(.sign):not(.seq) {
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--gone) 45%, transparent);
-}
-
 .grid.insert td {
   color: var(--came);
 }
@@ -381,6 +391,25 @@ th {
 .more {
   margin: 24px 0 0;
   color: var(--soft);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.key-name {
+  color: var(--soft);
+}
+
+.key input {
+  width: 9ch;
+  padding: 4px 8px;
+  font: 14px var(--mono);
+  color: inherit;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
 }
 
 .more .link {

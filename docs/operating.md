@@ -7,6 +7,7 @@
 | Requirement | Detail                                                                |
 | ----------- | --------------------------------------------------------------------- |
 | PostgreSQL  | 15 or later. Older versions are refused with a message                |
+| Rights      | An ordinary owner. No superuser is needed                             |
 | Extensions  | None                                                                  |
 | Roles       | `keyturn_agent`, `keyturn_approver` and `keyturn_rule`, all `NOLOGIN` |
 
@@ -68,12 +69,15 @@ select keyturn.protect('orders');
 | Fact                | Detail                                                                                 |
 | ------------------- | -------------------------------------------------------------------------------------- |
 | Size                | At most 10,000 rows                                                                    |
+| Waiting             | At most 200 for one login. More are refused until some are decided or expire           |
 | Lifetime            | One day by default, 30 days at most. An expired proposal cannot be approved or applied |
 | One row, one change | A proposal changes a given row once                                                    |
 | Primary keys        | Not changed by an update. Delete the row and insert another                            |
 | States              | `pending`, `approved`, `rejected`, `applied`, `stale`, `failed`                        |
 
-`stale` means a row no longer matched what was recorded, so nothing was written. `failed` means the write itself was refused, by a constraint or by a row coming out different; nothing was written then either.
+`stale` means a row no longer matched what was recorded, or its table was renamed, dropped or reshaped, so nothing was written. `failed` means the table itself refused the write, by a constraint or by a row coming out different; nothing was written then either.
+
+A lock that could not be had in time, a deadlock or a lost connection is neither. `apply` raises the error, the proposal stays approved, and the same call can be made again.
 
 ## Rules
 
@@ -83,15 +87,17 @@ select keyturn.allow(
   'tickets',                    -- table
   array['update'],              -- operations
   array['status', 'note'],      -- the only columns that may be set
-  p_max_rows => 1,
-  p_condition => $$after ->> 'status' = 'closed'$$,
-  p_per_hour => 60
+  max_rows => 1,
+  condition => $$after ->> 'status' = 'closed'$$,
+  per_hour => 60
 );
 ```
 
 - Writing a rule of the same name replaces it and raises its version.
 - The condition is SQL over two `jsonb` values, `before` and `after`. A row it cannot be worked out for is not covered.
 - The hourly count is kept by the rule's name and read from the audit log.
+- A rule decides only in a read committed transaction, the default. In any other, the proposal waits for a person.
+- On a table with row-level security, give the rule a condition that keeps rows to what the agent may see. `keyturn doctor` points such tables out.
 - Switch one off with `update keyturn.rules set active = false where name = 'close_tickets'`.
 
 Only the owner writes rules. An approver can read them; an agent cannot.
@@ -105,6 +111,12 @@ Only the owner writes rules. An approver can read them; an agent cannot.
 ## The review page
 
 `keyturn review` serves a page on 127.0.0.1 and prints its address, which carries a key made for that run. It uses the connection it was started with, so start it as the approver. To use it from another machine, forward the port over SSH; it does not listen on other addresses.
+
+If the database connection is lost, the command says so and exits with 1, and the page tells the reviewer it has lost contact. Start it again. `keyturn tools` does the same, so that whatever runs it can restart it.
+
+## Moving to a later version
+
+Version 0.1 installs into a database that does not have Keyturn, and refuses one that does. To move to a later version, uninstall and install. Proposals and the audit log are removed with it, so record the audit head and export `keyturn.audit` first if the record matters.
 
 ## Removing
 

@@ -73,6 +73,13 @@ const refund = (id: number) => ({
 const order = async (id: number) =>
   (await owner.query("select * from orders where id = $1", [id])).rows[0];
 const keyOf = (review: Review) => review.url.split("#")[1] as string;
+const centre = async (page: Page, selector: string): Promise<[number, number]> => {
+  const box = await page.locator(selector).boundingBox();
+  if (box === null) {
+    throw new Error(`${selector} is not on the page`);
+  }
+  return [box.x + box.width / 2, box.y + box.height / 2];
+};
 
 /** A request with every header chosen, which a browser's fetch does not allow. */
 function raw(
@@ -259,6 +266,12 @@ describe("the review page", () => {
     if (shots !== undefined) {
       await page.screenshot({ path: `${shots}/review-light.png` });
     }
+    // The sheet has the room; the bar along the bottom takes only what it needs.
+    const heights = await page.evaluate(
+      "[document.getElementById('sheet').clientHeight, document.getElementById('keys').clientHeight]",
+    );
+    expect((heights as number[])[1]).toBeLessThan(160);
+    expect((heights as number[])[0]).toBeGreaterThan(500);
 
     // One press asks; nothing is approved yet.
     await page.getByRole("button", { name: "Approve 2 changes" }).click();
@@ -349,9 +362,16 @@ describe("the review page", () => {
     expect(await page.locator(".more").innerText()).toContain("100 of 150 rows are on the page.");
 
     await page.getByRole("button", { name: "Approve 150 changes" }).click();
-    expect(await page.locator(".ask").textContent()).toBe(
-      "You have 100 rows of 150 on the page. Approving covers all 150.",
+    expect(await page.locator(".ask").textContent()).toContain(
+      "100 rows of 150 are on the page. Approving covers all 150.",
     );
+    // The number of rows has to be typed before rows nobody has read can be approved.
+    await page.waitForTimeout(900);
+    expect(await page.locator("#confirm-approve").isDisabled()).toBe(true);
+    await page.locator("#count").fill("100");
+    expect(await page.locator("#confirm-approve").isDisabled()).toBe(true);
+    await page.locator("#count").fill("150");
+    expect(await page.locator("#confirm-approve").isDisabled()).toBe(false);
     if (shots !== undefined) {
       await page.screenshot({ path: `${shots}/review-dark-large.png` });
     }
@@ -396,6 +416,187 @@ describe("the review page", () => {
       .toContain("bob rejected this: Already refunded by hand.");
     expect((await order(30)).status).toBe("paid");
     await page.context().close();
+  });
+
+  test("does not take a double click on Approve for a decision", async () => {
+    const made = await agent.propose([refund(60)], { note: "Refund order 60, clicked twice." });
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.locator(".queue button", { hasText: "clicked twice" }).click();
+    await page.getByRole("button", { name: "Approve 1 change" }).dblclick();
+    await page.waitForTimeout(300);
+    expect(await page.locator("#confirm-approve").isDisabled()).toBe(true);
+    expect((await agent.proposal(made.id))?.status).toBe("pending");
+    // Where the first button was, there is the way back, not the way on.
+    await page.mouse.click(...(await centre(page, "#not-yet")));
+    expect(await page.locator("#approve").count()).toBe(1);
+    expect((await agent.proposal(made.id))?.status).toBe("pending");
+    await page.context().close();
+  });
+
+  test("shows the white space, the kind and the key of a value exactly", async () => {
+    await owner.query(`
+      create table if not exists exact (id bigint primary key, body text, extra jsonb);
+      insert into exact values (9007199254740993, 'a', '100'), (2, 'b', null) on conflict do nothing;
+      select keyturn.protect('exact');
+      grant select on exact to keyturn_agent, keyturn_approver;
+    `);
+    const made = await agent.propose(
+      [
+        {
+          table: "exact",
+          operation: "update",
+          key: { id: "9007199254740993" },
+          set: { body: "a \n", extra: "100" },
+        },
+      ],
+      { note: "Looks like nothing changes." },
+    );
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.goto(`http://127.0.0.1:${review.port}/#${made.id}`);
+    await expect.poll(() => page.locator(".row-key").count()).toBe(1);
+    expect(await page.locator(".row-key").innerText()).toContain("id 9007199254740993");
+
+    const body = page.locator(".change tr", { hasText: "body" });
+    expect(await body.locator(".was .code").count()).toBe(0);
+    expect(await body.locator(".now .code").allTextContents()).toEqual(["space", "line break"]);
+    // The number 100 and the text "100" are different values that are written alike.
+    const extra = page.locator(".change tr", { hasText: "extra" });
+    expect(await extra.locator(".was").innerText()).toMatch(/^number\s+100$/);
+    expect(await extra.locator(".now").innerText()).toMatch(/^text\s+100$/);
+    await page.context().close();
+  });
+
+  test("never paints one proposal's rows into another", async () => {
+    const large = await agent.propose(
+      Array.from({ length: 150 }, (_, index) => ({
+        table: "orders",
+        operation: "delete" as const,
+        key: { id: 250 + index },
+      })),
+      { note: "The large one." },
+    );
+    const small = await agent.propose([refund(70)], { note: "The small one." });
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.locator(".queue button", { hasText: "The large one" }).click();
+    await expect.poll(() => page.locator(".grid.delete tbody tr").count()).toBe(100);
+
+    // The next page of the large one is held back until the small one is open.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/api/proposals/${large.id}/rows?from=101*`, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.getByRole("button", { name: "Show the next 50" }).click();
+    await page.locator(".queue button", { hasText: "The small one" }).click();
+    await expect.poll(() => page.locator(".note").textContent()).toBe("The small one.");
+    release();
+    await page.waitForTimeout(500);
+
+    expect(await page.locator(".grid.delete").count()).toBe(0);
+    expect(await page.locator(".change").count()).toBe(1);
+    expect(await page.locator("#approve").textContent()).toBe("Approve 1 change");
+    await new Keyturn(await database.as(logins.bob)).reject(large.id);
+    await new Keyturn(await database.as(logins.bob)).reject(small.id);
+    await page.context().close();
+  });
+
+  test("takes the open proposal off the page the moment another is chosen", async () => {
+    await agent.propose([refund(90)], { note: "The one that is open." });
+    const next = await agent.propose([refund(91)], { note: "The one chosen next." });
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.locator(".queue button", { hasText: "The one that is open" }).click();
+    await expect.poll(() => page.locator(".note").textContent()).toBe("The one that is open.");
+
+    // The next one's rows are held back, so that the moment in between can be looked at.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/api/proposals/${next.id}/rows*`, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.locator(".queue button", { hasText: "The one chosen next" }).click();
+    expect(await page.locator("#sheet").textContent()).toBe("Reading the proposal…");
+    expect(await page.locator("#keys").isVisible()).toBe(false);
+    expect(await page.locator("#approve").count()).toBe(0);
+    release();
+    await expect.poll(() => page.locator(".note").textContent()).toBe("The one chosen next.");
+    expect(await page.locator(".key .hash").textContent()).toBe(next.contentHash);
+    await page.context().close();
+  });
+
+  test("opens the proposal its address names, whenever the address is given", async () => {
+    await agent.propose([refund(92)], { note: "Listed first." });
+    const wanted = await agent.propose([refund(93)], { note: "Named in the address." });
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    // The page has settled on some proposal of its own choosing before the address changes.
+    await expect.poll(() => page.locator(".note").count(), { timeout: 10_000 }).toBe(1);
+    await page.goto(`http://127.0.0.1:${review.port}/#${wanted.id}`);
+    await expect
+      .poll(() => page.locator(".note").textContent(), { timeout: 10_000 })
+      .toBe("Named in the address.");
+    expect(await page.locator(".queue button[aria-current]").textContent()).toContain(
+      "Named in the address.",
+    );
+    await page.context().close();
+  });
+
+  test("says so, and lets nothing be decided, when it has lost contact", async () => {
+    const made = await agent.propose([refund(80)], { note: "Refund order 80, then silence." });
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.locator(".queue button", { hasText: "then silence" }).click();
+    await page.getByRole("button", { name: "Approve 1 change" }).click();
+    await review.close();
+
+    await expect.poll(() => page.locator("#lost").isVisible(), { timeout: 15_000 }).toBe(true);
+    expect(await page.locator("#lost").textContent()).toContain("lost contact");
+    expect(await page.locator("#keys").innerText()).toContain("until it is in contact again");
+    expect(await page.locator("#keys button").count()).toBe(0);
+    expect((await agent.proposal(made.id))?.status).toBe("pending");
+    await page.context().close();
+  });
+
+  test("stays quick to list when one agent fills its whole allowance with long notes", async () => {
+    const flooder = new Keyturn(await database.as(logins.otherAgent));
+    const db = await database.as(logins.otherAgent);
+    await db.query(
+      `select keyturn.propose(jsonb_build_array(jsonb_build_object('table', 'orders', 'operation', 'update', 'key', jsonb_build_object('id', 1 + n % 5), 'set', jsonb_build_object('memo', 'x'))), repeat('flood ', 333))
+         from generate_series(1, 200) as n`,
+    );
+    expect((await flooder.waiting()).length).toBe(200);
+    const review = await reviewAs(logins.alice);
+    const from = performance.now();
+    const listed = await raw(review, "/api/proposals", {
+      headers: { authorization: `Bearer ${keyOf(review)}` },
+    });
+    expect(performance.now() - from).toBeLessThan(5000);
+    expect(listed.body.length).toBeLessThan(400_000);
+    const data = JSON.parse(listed.body) as {
+      proposals: { note: string; extent: unknown[] }[];
+      more: boolean;
+    };
+    expect(data.proposals.length).toBe(200);
+    expect(data.more).toBe(true);
+    expect(Math.max(...data.proposals.map((proposal) => proposal.note.length))).toBeLessThanOrEqual(
+      300,
+    );
+    expect(data.proposals[0]?.extent).toHaveLength(1);
+    await db.query("select 1");
+    const bob = await database.as(logins.bob);
+    await bob.query(
+      "select keyturn.reject(id, 'flood') from keyturn.proposals where status = 'pending' and proposed_by = $1",
+      [logins.otherAgent],
+    );
   });
 
   test("offers an agent's login nothing to press, and shows nothing without the key", async () => {

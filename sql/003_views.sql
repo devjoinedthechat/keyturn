@@ -34,7 +34,7 @@ create index proposals_in_transaction on keyturn.proposals (proposed_by, transac
 -- lets nothing through: a trigger that returns nothing tells PostgreSQL the row was left alone.
 create function keyturn.capture() returns trigger
   language plpgsql security definer
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   -- This runs once a row, and looks its proposal's rows up each time. A plan made while the
   -- table looked empty would read all of them every time: ten thousand rows, a hundred
   -- million reads. Every lookup here has an index, and this has the planner use it.
@@ -42,7 +42,7 @@ create function keyturn.capture() returns trigger
   -- Compiling a query that reads one row costs many times what the query does.
   set jit = off
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
-  set extra_float_digits = 3 set bytea_output = 'hex'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   as $$
 <<row_>>
 declare
@@ -62,7 +62,7 @@ begin
   if not keyturn.caller_is('keyturn_agent') then
     raise exception 'keyturn: % is not an agent', session_user using errcode = 'insufficient_privilege';
   end if;
-  if target.shape <> keyturn.shape_of(target.relation) then
+  if target.shape is distinct from keyturn.shape_of(target.relation) then
     raise exception 'keyturn: % has changed shape since it was protected; protect it again', target.relation;
   end if;
 
@@ -91,6 +91,9 @@ begin
     if after is null then
       raise exception 'keyturn: an insert gives at least one value';
     end if;
+    if exists (select from pg_attribute where attrelid = target.relation and attname = any (columns) and attidentity = 'a') then
+      raise exception 'keyturn: % numbers its rows itself; an insert gives no value for that column', target.relation;
+    end if;
     key := coalesce((select jsonb_object_agg(entry.key, entry.value) from jsonb_each(after) as entry where entry.key = any (target.key_columns)), '{}'::jsonb);
   else
     columns := '{}';
@@ -100,6 +103,7 @@ begin
   select id into proposal from keyturn.proposals
    where proposed_by = session_user and transaction = pg_current_xact_id() and status = 'pending';
   if proposal is null then
+    perform keyturn.room_for_another();
     insert into keyturn.proposals (proposed_by, note, expires_at, transaction)
       values (session_user, left(coalesce(current_setting('keyturn.note', true), ''), 2000), clock_timestamp() + interval '1 day', pg_current_xact_id())
       returning id into proposal;
@@ -115,15 +119,15 @@ begin
     raise exception 'keyturn: a proposal holds at most 10000 changes, and this reaches more. Nothing is recorded. Narrow the statement, or make the change in parts';
   end if;
 
-  insert into keyturn.changes (proposal_id, seq, relation, shape, operation, key, before, after, columns)
-    values (proposal, seq, target.relation, target.shape, operation, key, before, after, columns);
+  insert into keyturn.changes (proposal_id, seq, relation, relation_name, shape, operation, key, before, after, columns)
+    values (proposal, seq, target.relation, keyturn.name_of(target.relation), target.shape, operation, key, before, after, columns);
   return null;
 end $$;
 
 -- The proposal the current transaction has put together so far, with the hash an approver will be asked for.
 create function keyturn.proposed() returns table (proposal_id uuid, content_hash text, changes bigint)
   language sql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
     select p.id, keyturn.hash_of(p.id), (select count(*) from keyturn.changes c where c.proposal_id = p.id)
       from keyturn.proposals p
@@ -133,7 +137,7 @@ create function keyturn.proposed() returns table (proposal_id uuid, content_hash
 -- Says why, for the proposal this transaction makes. Call it before or after the statements.
 create function keyturn.note(p_note text) returns void
   language plpgsql security definer
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 begin
   if length(coalesce(p_note, '')) > 2000 then
@@ -147,7 +151,7 @@ end $$;
 -- Protecting a table also makes its view, and making it again replaces the view.
 create or replace function keyturn.protect(p_relation regclass, p_exact boolean default true) returns void
   language plpgsql
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   key_columns text[];
@@ -198,7 +202,7 @@ end $$;
 -- this before such a migration and keyturn.protect() after it. In between, propose() works.
 create function keyturn.drop_view(p_relation regclass) returns void
   language plpgsql
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   target keyturn.protected;
@@ -214,7 +218,7 @@ end $$;
 -- open are closed as stale: they can no longer be applied. What was proposed is kept.
 create function keyturn.unprotect(p_relation regclass) returns void
   language plpgsql
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   target keyturn.protected;

@@ -36,6 +36,8 @@ interface Tool {
     idempotentHint: boolean;
     openWorldHint: boolean;
   };
+  /** What to tell the model when the tool fails for a reason that is neither a refusal nor its own mistake. */
+  onFault?: string;
   call(input: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
 }
 
@@ -48,6 +50,17 @@ const text = (input: Record<string, unknown>, name: string, most: number): strin
     throw new Mistake(`"${name}" must be text of 1 to ${most} characters.`);
   }
   return given;
+};
+
+const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const proposalId = (input: Record<string, unknown>): string => {
+  const given = input.proposal_id;
+  if (typeof given !== "string" || !isId.test(given)) {
+    throw new Mistake(
+      '"proposal_id" must be the id that propose_change returned, such as 3f2c1a9e-5b7d-4c1e-9a2f-0d6b8e4c7a15.',
+    );
+  }
+  return given.toLowerCase();
 };
 
 const briefly = (proposal: Proposal) => ({
@@ -82,7 +95,7 @@ function toolsOver(db: Queryable): Tool[] {
         const { rows } = await db.query(`
           select format('%I.%I', n.nspname, c.relname) as "table", p.key_columns as primary_key,
                  (select jsonb_agg(jsonb_build_object('name', a.attname, 'type', format_type(a.atttypid, a.atttypmod),
-                                                      'settable', a.attgenerated = '') order by a.attnum)
+                                                      'settable', a.attgenerated = '' and a.attidentity <> 'a') order by a.attnum)
                     from pg_attribute a where a.attrelid = p.relation and a.attnum > 0 and not a.attisdropped) as columns
             from keyturn.protected p
             join pg_class c on c.oid = p.relation
@@ -192,7 +205,7 @@ function toolsOver(db: Queryable): Tool[] {
       },
       annotations: reads,
       call: async (input, signal) => {
-        const id = text(input, "proposal_id", 36);
+        const id = proposalId(input);
         const wait = input.wait_seconds ?? 0;
         if (typeof wait !== "number" || !Number.isInteger(wait) || wait < 0 || wait > 300) {
           throw new Mistake('"wait_seconds" must be a whole number from 0 to 300.');
@@ -235,8 +248,11 @@ function toolsOver(db: Queryable): Tool[] {
         idempotentHint: true,
         openWorldHint: false,
       },
+      // The write and the answer are two things, and the answer can be lost after the write was done.
+      onFault:
+        "The tool failed, and whether the proposal was applied is not known. Call check_proposal to find out before doing anything else.",
       call: async (input) => {
-        const id = text(input, "proposal_id", 36);
+        const id = proposalId(input);
         const outcome = await keyturn.apply(id);
         return { proposal_id: id, ...outcome, written: outcome.status === "applied" };
       },
@@ -276,7 +292,12 @@ export async function unfitForAgent(db: Queryable): Promise<string | null> {
  * Serves the tools until the input ends. `input` and `output` carry one JSON-RPC message a
  * line; nothing else is ever written to `output`.
  */
-export async function serveTools(db: Queryable, input: Readable, output: Writable): Promise<void> {
+export async function serveTools(
+  db: Queryable,
+  input: Readable,
+  output: Writable,
+  options: { fault?: (error: unknown) => void } = {},
+): Promise<void> {
   const tools = toolsOver(db);
   const release = await version();
   const running = new Map<string | number, AbortController>();
@@ -354,6 +375,13 @@ export async function serveTools(db: Queryable, input: Readable, output: Writabl
           });
           return;
         }
+        if (running.has(id)) {
+          write({
+            id,
+            error: { code: -32600, message: "A request with this id is still running." },
+          });
+          return;
+        }
         const given = params.arguments ?? {};
         const stop = new AbortController();
         running.set(id, stop);
@@ -378,12 +406,15 @@ export async function serveTools(db: Queryable, input: Readable, output: Writabl
           // What the database refused, and what the model got wrong, go back to the model as
           // the tool's answer: it can read them and act. Anything else is a fault here, and
           // its detail stays out of the model's reach.
+          if (!(error instanceof Refused || error instanceof Mistake)) {
+            options.fault?.(error);
+          }
           const said =
             error instanceof Refused
               ? `Refused by the database: ${error.message}`
               : error instanceof Mistake
                 ? error.message
-                : "The tool failed. Nothing was written.";
+                : (tool.onFault ?? "The tool failed. Nothing was written.");
           write({ id, result: { content: [{ type: "text", text: said }], isError: true } });
         } finally {
           running.delete(id);

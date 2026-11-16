@@ -35,14 +35,17 @@ with psycopg.connect("postgresql://support_agent@localhost/shop", autocommit=Tru
         print(decided.reason)
 ```
 
-| Method                         | Who calls it           | What it does                                               |
-| ------------------------------ | ---------------------- | ---------------------------------------------------------- |
-| `propose`, `apply`, `decision` | An agent               | Propose rows, wait for a decision, write what was approved |
-| `waiting`, `extent`, `diff`    | An approver            | Read what would change, values as PostgreSQL writes them   |
-| `approve`, `reject`            | An approver            | Decide. An approval names the hash of what was read        |
-| `doctor`, `verify_audit`       | The owner, an approver | Check the setup and the audit log                          |
+| Method                            | Who calls it           | What it does                                                                      |
+| --------------------------------- | ---------------------- | --------------------------------------------------------------------------------- |
+| `propose`, `apply`, `decision`    | An agent               | Propose rows, wait for a decision, write what was approved                        |
+| `waiting`, `extent`, `diff`       | An approver            | Read what would change, values as PostgreSQL writes them                          |
+| `approve`, `reject`               | An approver            | Decide. An approval names the hash of what was read                               |
+| `doctor`, `verify_audit`          | The owner, an approver | Check the setup and the audit log                                                 |
+| `recent`, `history`, `audit_head` | Either                 | The latest proposals, what happened to one, and one value for the whole audit log |
 
 A refusal from the database is raised as `Refused`, with the database's own sentence.
+
+Each call is committed when it returns, in autocommit mode or not, so an apply that says `applied` has been written. A call made inside a transaction the caller opened, with `connection.transaction()`, is kept or lost with that transaction.
 
 ## Development
 

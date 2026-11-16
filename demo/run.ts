@@ -172,7 +172,7 @@ if (review) {
   await keyturn(
     "dana",
     dana,
-    ["approve", second.id.slice(0, 8), "--rows", "3", "--apply"],
+    ["approve", second.id.slice(0, 8), "--rows", "12", "--apply"],
     ["approve"],
   );
   console.log(dim(`   orders in the table: ${(await orders()).toLocaleString("en")}`));

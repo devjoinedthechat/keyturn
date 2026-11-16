@@ -9,6 +9,7 @@ from keyturn.client import (
     Proposal,
     Refused,
     RowDiff,
+    Step,
     Undecided,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "Proposal",
     "Refused",
     "RowDiff",
+    "Step",
     "Undecided",
 ]

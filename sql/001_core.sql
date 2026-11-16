@@ -86,6 +86,9 @@ create table keyturn.changes (
   seq         integer  not null,
   -- Not held to the list of protected tables: a proposal is kept after its table has left Keyturn's care.
   relation    regclass not null,
+  -- The table's name, with its schema, when the change was proposed. It is what a reviewer
+  -- read and what the hash covers; a table renamed, moved or dropped since no longer matches.
+  relation_name text   not null,
   shape       text     not null,
   operation   text     not null check (operation in ('insert', 'update', 'delete')),
   key         jsonb    not null,
@@ -102,6 +105,9 @@ create table keyturn.changes (
 -- quick in a proposal of thousands of rows. An insert that leaves its key to a default has
 -- no key yet, and is not counted.
 create unique index one_change_per_row on keyturn.changes (proposal_id, relation, key) where key <> '{}'::jsonb;
+create index changes_by_relation on keyturn.changes (relation);
+-- The review queue, and the count of what one login has waiting.
+create index proposals_waiting on keyturn.proposals (proposed_by, proposed_at) where status = 'pending';
 
 
 -- What happened to each proposal, in order: opened, approved or rejected, and what became of
@@ -130,7 +136,7 @@ create trigger audit_is_not_emptied before truncate on keyturn.audit execute fun
 
 create function keyturn.audit_hash(p_prev text, p_proposal uuid, p_at timestamptz, p_actor name, p_event text, p_detail jsonb) returns text
   language sql immutable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
     select encode(sha256(convert_to(p_prev || '|' || p_proposal || '|' || to_char(p_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US')
              || '|' || p_actor || '|' || p_event || '|' || p_detail::text, 'UTF8')), 'hex')
@@ -140,7 +146,7 @@ create function keyturn.audit_hash(p_prev text, p_proposal uuid, p_at timestampt
 -- while they do, so a proposal's entries have one order.
 create function keyturn.audit_append(p_proposal uuid, p_event text, p_detail jsonb default '{}') returns void
   language plpgsql
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   previous text;
@@ -181,7 +187,7 @@ create table keyturn.rules (
 -- The rules that together cover a proposal, or null when some change is covered by none.
 create function keyturn.rules_covering(p_proposal_id uuid) returns jsonb
   language plpgsql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   change  keyturn.changes;
@@ -221,34 +227,38 @@ begin
 end $$;
 
 -- Writes a rule, or replaces one of the same name with the next version. For the tables' owner.
-create function keyturn.allow(p_name text, p_relation regclass, p_operations text[], p_columns text[] default null,
-                              p_max_rows integer default 1, p_condition text default null, p_per_hour integer default 60) returns void
+create function keyturn.allow(name text, relation regclass, operations text[], columns text[] default null,
+                              max_rows integer default 1, condition text default null, per_hour integer default 60) returns void
   language plpgsql
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
+-- The parameters carry the names of the rule's columns, so that a call reads
+-- "max_rows => 5". Inside, a bare name is the column and "allow.name" the parameter.
+#variable_conflict use_column
 declare
   unknown text;
 begin
-  if not exists (select from keyturn.protected where relation = p_relation) then
-    raise exception 'keyturn: % is not a table under keyturn', p_relation;
+  if not exists (select from keyturn.protected p where p.relation = allow.relation) then
+    raise exception 'keyturn: % is not a table under keyturn', allow.relation;
   end if;
-  select name into unknown from unnest(coalesce(p_columns, '{}')) as name
-   where not exists (select from pg_attribute where attrelid = p_relation and attname = name and attnum > 0 and not attisdropped);
+  select wanted.name into unknown from unnest(coalesce(allow.columns, '{}')) as wanted (name)
+   where not exists (select from pg_attribute a where a.attrelid = allow.relation and a.attname = wanted.name and a.attnum > 0 and not a.attisdropped);
   if unknown is not null then
-    raise exception 'keyturn: % has no column "%"', p_relation, unknown;
+    raise exception 'keyturn: % has no column "%"', allow.relation, unknown;
   end if;
-  if p_operations && array['insert', 'update'] and coalesce(cardinality(p_columns), 0) = 0 then
+  if allow.operations && array['insert', 'update'] and coalesce(cardinality(allow.columns), 0) = 0 then
     raise exception 'keyturn: a rule for inserts or updates lists the columns that may be set';
   end if;
-  if p_condition is not null then
+  if allow.condition is not null then
     -- Tried once on an empty row, so that a condition that is not SQL is refused when it is written and not when it is needed.
-    execute format('select (%s)::boolean from (select $1 as before, $2 as after) as change', p_condition) using '{}'::jsonb, '{}'::jsonb;
+    execute format('select (%s)::boolean from (select $1 as before, $2 as after) as change', allow.condition) using '{}'::jsonb, '{}'::jsonb;
   end if;
   insert into keyturn.rules (name, relation, operations, columns, max_rows, condition, per_hour)
-    values (p_name, p_relation, p_operations, p_columns, p_max_rows, p_condition, p_per_hour)
+    values (allow.name, allow.relation, allow.operations, allow.columns, allow.max_rows, allow.condition, allow.per_hour)
     on conflict (name) do update
       set relation = excluded.relation, operations = excluded.operations, columns = excluded.columns, max_rows = excluded.max_rows,
-          condition = excluded.condition, per_hour = excluded.per_hour, active = true, version = keyturn.rules.version + 1, written_by = session_user, written_at = clock_timestamp();
+          condition = excluded.condition, per_hour = excluded.per_hour, active = true, version = keyturn.rules.version + 1,
+          written_by = session_user, written_at = clock_timestamp();
 end $$;
 
 -- ---------------------------------------------------------------- how a row is written down
@@ -257,34 +267,67 @@ end $$;
 -- written in the session's time zone, a float with the session's digits. Every function
 -- that reads or compares a row therefore runs with these settings, whatever the caller's are.
 --
---   TimeZone UTC, DateStyle ISO, IntervalStyle iso_8601, extra_float_digits 3, bytea_output hex
+--   TimeZone UTC, DateStyle ISO, IntervalStyle iso_8601, extra_float_digits 3, bytea_output hex,
+--   lc_monetary C
 
 -- What a table looks like: its columns, in order, with their types. Two tables with the
 -- same text here hold rows that can be compared.
 create function keyturn.shape_of(p_relation regclass) returns text
   language sql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
     select string_agg(attname || ' ' || format_type(atttypid, atttypmod) || case when attgenerated <> '' then ' generated' else '' end, ', ' order by attnum)
       from pg_attribute
      where attrelid = p_relation and attnum > 0 and not attisdropped
   $$;
 
--- The condition that picks out one row by its key, for a row given as JSON in $1.
+-- A table's name with its schema, or null when the table is gone.
+create function keyturn.name_of(p_relation regclass) returns text
+  language sql stable
+  set search_path = pg_catalog, pg_temp
+  as $$
+    select format('%I.%I', n.nspname, c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = p_relation
+  $$;
+
+-- Columns with their types, as a record definition: "id integer, total numeric(10,2)". JSON
+-- is read into exactly these columns, each through its own type. A whole row of the table
+-- is never built from part of one: a column that may not be null would refuse to be absent.
+create function keyturn.columns_as(p_relation regclass, p_columns text[]) returns text
+  language sql stable
+  set search_path = pg_catalog, pg_temp
+  as $$
+    select string_agg(format('%I %s', attname, format_type(atttypid, atttypmod)), ', ' order by attnum)
+      from pg_attribute
+     where attrelid = p_relation and attnum > 0 and not attisdropped and attname = any (p_columns)
+  $$;
+
+-- The condition that picks out one row by its key, for a key given as JSON in $1.
+--
+-- Each key column is compared with the equality its primary key index uses. A type from an
+-- extension keeps its own (a case-insensitive text stays case-insensitive), which the short
+-- search path these functions run with would otherwise not find.
 create function keyturn.key_condition(p_relation regclass, p_key_columns text[]) returns text
   language sql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
-    select string_agg(format('t.%1$I = (jsonb_populate_record(null::%2$s, $1)).%1$I', key_column, p_relation), ' and ')
-      from unnest(p_key_columns) as key_column
+    select string_agg(format('t.%1$I operator(%2$I.%3$s) (select k.%1$I from pg_catalog.jsonb_to_record($1) as k (%1$I %4$s))',
+                             a.attname, n.nspname, o.oprname, format_type(a.atttypid, a.atttypmod)), ' and ' order by wanted.position)
+      from unnest(p_key_columns) with ordinality as wanted (name, position)
+      join pg_attribute a on a.attrelid = p_relation and a.attname = wanted.name and a.attnum > 0 and not a.attisdropped
+      join pg_index i on i.indrelid = p_relation and i.indisprimary
+      join lateral unnest(i.indkey::int2[], i.indclass::oid[]) as part (attnum, opclass) on part.attnum = a.attnum
+      join pg_opclass c on c.oid = part.opclass
+      join pg_amop m on m.amopfamily = c.opcfamily and m.amoplefttype = c.opcintype and m.amoprighttype = c.opcintype and m.amopstrategy = 3
+      join pg_operator o on o.oid = m.amopopr
+      join pg_namespace n on n.oid = o.oprnamespace
   $$;
 
 -- A row of a table, written down: every column but the ones the table works out itself.
 -- "t" is the row in the query this is put into.
 create function keyturn.image(p_derived text[]) returns text
   language sql immutable
-  set search_path = pg_catalog
-  as $$ select format('(to_jsonb(t) - %L::text[])', p_derived) $$;
+  set search_path = pg_catalog, pg_temp
+  as $$ select format('(pg_catalog.to_jsonb(t) - %L::pg_catalog.text[])', p_derived) $$;
 
 -- ---------------------------------------------------------------- protecting a table
 
@@ -292,7 +335,7 @@ create function keyturn.image(p_derived text[]) returns text
 -- the rows it changes by it.
 create function keyturn.protect(p_relation regclass, p_exact boolean default true) returns void
   language plpgsql
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   key_columns text[];
@@ -327,12 +370,25 @@ end $$;
 --
 -- The rows are read here, as they are now, and kept. What is returned is the proposal's id
 -- and the hash of its content, which is what an approver approves.
+-- One login may have so many proposals waiting and no more. Every waiting proposal is one a
+-- person has to look at; without a limit, the party being reviewed could bury the ones that
+-- matter, and fill the database with row images.
+create function keyturn.room_for_another() returns void
+  language plpgsql
+  set search_path = pg_catalog, pg_temp
+  as $$
+begin
+  if (select count(*) from keyturn.proposals where proposed_by = session_user and status = 'pending' and expires_at > clock_timestamp()) >= 200 then
+    raise exception 'keyturn: % already has 200 proposals waiting for a decision. No more are taken until some are decided or expire', session_user;
+  end if;
+end $$;
+
 create function keyturn.record_proposal(p_changes jsonb, p_note text, p_valid_for interval)
   returns table (proposal_id uuid, content_hash text)
   language plpgsql security definer
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
-  set extra_float_digits = 3 set bytea_output = 'hex'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   -- Each change looks up the proposal's earlier ones. Every such lookup has an index, and
   -- this has the planner use it even while the table's statistics say it is empty.
   set enable_seqscan = off
@@ -352,6 +408,10 @@ declare
   unknown   text;
   seq       integer := 0;
   proposal  uuid := gen_random_uuid();
+  -- Worked out once for a table and kept while the changes stay with it.
+  kept_for  oid;
+  reading   text;
+  whole_row text;
 begin
   if jsonb_typeof(p_changes) is distinct from 'array' or jsonb_array_length(p_changes) = 0 then
     raise exception 'keyturn: a proposal is a list of at least one change';
@@ -362,6 +422,8 @@ begin
   if p_valid_for <= interval '0' or p_valid_for > interval '30 days' then
     raise exception 'keyturn: a proposal is valid for up to 30 days';
   end if;
+
+  perform keyturn.room_for_another();
 
   -- The proposal's row comes first, so its changes can refer to it.
   insert into keyturn.proposals (id, proposed_by, note, expires_at)
@@ -381,7 +443,7 @@ begin
       raise exception 'keyturn: change %: % is not a table under keyturn', seq,
         coalesce(case when change ->> 'table' ~ '^[0-9]+$' then to_regclass((change ->> 'table')::oid::regclass::text)::text end, change ->> 'table', '(none)');
     end if;
-    if target.shape <> keyturn.shape_of(target.relation) then
+    if target.shape is distinct from keyturn.shape_of(target.relation) then
       raise exception 'keyturn: % has changed shape since it was protected; protect it again', target.relation;
     end if;
 
@@ -395,7 +457,9 @@ begin
     columns := coalesce(columns, '{}');
     select name into unknown from unnest(columns) as name
      where not exists (select from pg_attribute
-                        where attrelid = target.relation and attname = name and attnum > 0 and not attisdropped and attgenerated = '');
+                        where attrelid = target.relation and attname = name and attnum > 0 and not attisdropped and attgenerated = ''
+                              -- A column the table always numbers itself takes no value from anyone.
+                              and not (operation = 'insert' and attidentity = 'a'));
     if unknown is not null then
       raise exception 'keyturn: change %: % has no column "%" that can be set', seq, target.relation, unknown;
     end if;
@@ -407,8 +471,7 @@ begin
     if operation = 'insert' then
       before := null;
       -- Passed through the table's own types, so that 1 and "1" and 1.0 are written one way.
-      execute format('select to_jsonb(r) from jsonb_populate_record(null::%s, $1) r', target.relation) into after using given;
-      after := (select jsonb_object_agg(entry.key, entry.value) from jsonb_each(after) as entry where entry.key = any (columns));
+      execute format('select to_jsonb(r) from jsonb_to_record($1) as r (%s)', keyturn.columns_as(target.relation, columns)) into after using given;
       key := (select jsonb_object_agg(entry.key, entry.value) from jsonb_each(after) as entry where entry.key = any (target.key_columns));
       key := coalesce(key, '{}'::jsonb);
     else
@@ -421,8 +484,13 @@ begin
         raise exception 'keyturn: change %: a primary key is not changed by an update; delete the row and insert another', seq;
       end if;
 
-      execute format('select %s from %s t where %s', keyturn.image(target.derived), target.relation, keyturn.key_condition(target.relation, target.key_columns))
-        into before using key;
+      if kept_for is distinct from target.relation::oid then
+        kept_for := target.relation::oid;
+        reading := format('select %s from %s t where %s', keyturn.image(target.derived), target.relation, keyturn.key_condition(target.relation, target.key_columns));
+        whole_row := format('select to_jsonb(t) from jsonb_to_record($1) as t (%s)', keyturn.columns_as(target.relation,
+                       array(select attname::text from pg_attribute where attrelid = target.relation and attnum > 0 and not attisdropped and attname <> all (target.derived))));
+      end if;
+      execute reading into before using key;
       -- A proposal keeps the row it would change, and the proposer can read the proposal. So
       -- the proposer must already be able to read that row. propose() read it with the caller's
       -- own rights and handed it over as "seen"; it has to be the row that is really there.
@@ -432,7 +500,7 @@ begin
       key := (select jsonb_object_agg(entry.key, entry.value) from jsonb_each(before) as entry where entry.key = any (target.key_columns));
 
       if operation = 'update' then
-        execute format('select %s from jsonb_populate_record(null::%s, $1) t', keyturn.image(target.derived), target.relation) into after using before || given;
+        execute whole_row into after using before || given;
         if after = before then
           raise exception 'keyturn: change %: the row already has these values', seq;
         end if;
@@ -446,8 +514,8 @@ begin
       raise exception 'keyturn: change %: the row % of % already has a change in this proposal', seq, key, target.relation;
     end if;
 
-    insert into keyturn.changes (proposal_id, seq, relation, shape, operation, key, before, after, columns)
-      values (proposal, seq, target.relation, target.shape, operation, key, before, after, columns);
+    insert into keyturn.changes (proposal_id, seq, relation, relation_name, shape, operation, key, before, after, columns)
+      values (proposal, seq, target.relation, keyturn.name_of(target.relation), target.shape, operation, key, before, after, columns);
   end loop;
 
   perform keyturn.audit_append(proposal, 'opened', jsonb_build_object('changes', seq));
@@ -464,15 +532,21 @@ create function keyturn.propose(p_changes jsonb, p_note text default '', p_valid
   returns table (proposal_id uuid, content_hash text)
   language plpgsql
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
-  set extra_float_digits = 3 set bytea_output = 'hex'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   as $$
+-- No search path is set here, on purpose: the caller's own decides which table a bare name
+-- means. So every type below is written with its schema, and nothing here runs with more
+-- than the caller's rights.
 declare
-  change   jsonb;
-  position bigint;
+  change   pg_catalog.jsonb;
+  position pg_catalog.int8;
   target   keyturn.protected;
-  seen     jsonb;
+  seen     pg_catalog.jsonb;
   -- An array, added to in place. A jsonb list joined to itself row by row is copied whole each time.
-  named    jsonb[] := '{}';
+  named    pg_catalog.jsonb[] := '{}';
+  -- The query that reads one row of a table, kept while the changes stay with that table.
+  reading  pg_catalog.text;
+  read_of  pg_catalog.oid;
 begin
   if jsonb_typeof(p_changes) is distinct from 'array' then
     return query select * from keyturn.record_proposal(p_changes, p_note, p_valid_for);
@@ -482,11 +556,14 @@ begin
   for change, position in select listed.change, listed.position from jsonb_array_elements(p_changes) with ordinality as listed (change, position) loop
     if jsonb_typeof(change) = 'object' and to_regclass(change ->> 'table') is not null then
       select * into target from keyturn.protected where relation = to_regclass(change ->> 'table');
-      change := (change - 'seen') || jsonb_build_object('table', to_regclass(change ->> 'table')::oid::text);
+      change := (change - 'seen') || jsonb_build_object('table', to_regclass(change ->> 'table')::pg_catalog.oid::pg_catalog.text);
       if target.relation is not null and change ->> 'operation' in ('update', 'delete') and jsonb_typeof(change -> 'key') = 'object' then
+        if read_of is distinct from target.relation::pg_catalog.oid then
+          read_of := target.relation::pg_catalog.oid;
+          reading := format('select %s from %s t where %s', keyturn.image(target.derived), target.relation, keyturn.key_condition(target.relation, target.key_columns));
+        end if;
         begin
-          execute format('select %s from %s t where %s', keyturn.image(target.derived), target.relation, keyturn.key_condition(target.relation, target.key_columns))
-            into seen using change -> 'key';
+          execute reading into seen using change -> 'key';
         exception when insufficient_privilege then
           seen := null;
         end;
@@ -502,12 +579,12 @@ end $$;
 -- keys in one order and its numbers one way, so the same content always gives the same text.
 create function keyturn.hash_of(p_proposal_id uuid) returns text
   language sql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
     select encode(sha256(convert_to(jsonb_build_object(
              'note', (select note from keyturn.proposals where id = p_proposal_id),
              'changes', jsonb_agg(jsonb_build_object(
-               'table', relation::text, 'shape', shape, 'operation', operation,
+               'table', relation_name, 'shape', shape, 'operation', operation,
                'key', key, 'before', before, 'after', after, 'columns', columns) order by seq))::text, 'UTF8')), 'hex')
       from keyturn.changes
      where proposal_id = p_proposal_id
@@ -519,14 +596,14 @@ create function keyturn.hash_of(p_proposal_id uuid) returns text
 -- that runs with its owner's rights still sees who connected.
 create function keyturn.caller_is(p_group name) returns boolean
   language sql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$ select pg_has_role(session_user, p_group, 'MEMBER') $$;
 
 -- Approves a proposal. The approver says which content they are approving, by its hash. If
 -- that is not what the proposal holds, nothing is approved.
 create function keyturn.approve(p_proposal_id uuid, p_content_hash text) returns void
   language plpgsql security definer
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   proposal keyturn.proposals;
@@ -558,7 +635,7 @@ end $$;
 
 create function keyturn.reject(p_proposal_id uuid, p_reason text default null) returns void
   language plpgsql security definer
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   proposal keyturn.proposals;
@@ -591,9 +668,9 @@ end $$;
 -- Returns what became of it: applied, stale, or failed, with the reason.
 create function keyturn.apply(p_proposal_id uuid) returns jsonb
   language plpgsql security definer
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
-  set extra_float_digits = 3 set bytea_output = 'hex'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   -- Each change is a query for one row. Compiling those costs many times what they do.
   set jit = off
   as $$
@@ -602,6 +679,7 @@ declare
   change   keyturn.changes;
   target   keyturn.protected;
   locate   text;
+  located  oid;
   current_ jsonb;
   written  jsonb;
   touched  bigint;
@@ -626,9 +704,20 @@ begin
   end if;
   -- Nobody has decided. If the owner's rules cover every change in it, they decide, and it is on record that they did.
   if proposal.status = 'pending' then
+    -- The rules for these tables are held first and read after, so that a rule switched off or
+    -- rewritten meanwhile is seen as it now is, and two proposals under one rule are counted
+    -- one after the other.
+    perform from keyturn.rules r
+      where r.relation in (select c.relation from keyturn.changes c where c.proposal_id = p_proposal_id)
+      order by r.name for update;
     covered := keyturn.rules_covering(p_proposal_id);
-    for rule in select r.* from keyturn.rules r where covered ? r.name order by r.name for update loop
-      -- Holding the rule's row makes two proposals under one rule count one after the other.
+    if covered is not null and current_setting('transaction_isolation') <> 'read committed' then
+      -- A transaction that keeps one view of the data for its whole length cannot see what a
+      -- rule let through after it began, and would count short.
+      raise exception 'keyturn: a rule decides only in a read committed transaction; this one is %', current_setting('transaction_isolation')
+        using errcode = 'insufficient_privilege';
+    end if;
+    for rule in select r.* from keyturn.rules r where covered ? r.name order by r.name loop
       select count(*) into touched from keyturn.audit
        where event = 'approved_by_rule' and at > clock_timestamp() - interval '1 hour' and detail -> 'rules' ? rule.name;
       if touched >= rule.per_hour then
@@ -651,14 +740,35 @@ begin
 
   -- First pass: every row the proposal touches is locked and held against what was recorded.
   -- Nothing is written until all of them match.
-  for change in select * from keyturn.changes where proposal_id = p_proposal_id order by seq loop
+  --
+  -- Rows are locked in one order whatever order the proposal lists them in, so that two
+  -- proposals touching the same rows cannot each hold what the other waits for.
+  for change in select * from keyturn.changes where proposal_id = p_proposal_id order by relation, key, seq loop
     select * into target from keyturn.protected where relation = change.relation;
-    if target.relation is null or change.shape <> keyturn.shape_of(change.relation) then
+    if keyturn.name_of(change.relation) is null then
+      result := jsonb_build_object('status', 'stale', 'change', change.seq, 'reason', format('%s no longer exists', change.relation_name));
+      exit;
+    end if;
+    if keyturn.name_of(change.relation) <> change.relation_name then
+      result := jsonb_build_object('status', 'stale', 'change', change.seq,
+        'reason', format('%s has been renamed to %s since the proposal was made', change.relation_name, keyturn.name_of(change.relation)));
+      exit;
+    end if;
+    if target.relation is null then
+      result := jsonb_build_object('status', 'stale', 'change', change.seq, 'reason', format('%s is no longer under keyturn', change.relation_name));
+      exit;
+    end if;
+    if change.shape is distinct from keyturn.shape_of(change.relation) then
       result := jsonb_build_object('status', 'stale', 'change', change.seq, 'reason', format('%s has changed shape since the proposal was made', change.relation));
       exit;
     end if;
-    locate := keyturn.key_condition(change.relation, target.key_columns);
-    execute format('select %s from %s t where %s for update', keyturn.image(target.derived), change.relation, locate) into current_ using change.key;
+    if located is distinct from change.relation::oid then
+      located := change.relation::oid;
+      locate := keyturn.key_condition(change.relation, target.key_columns);
+    end if;
+    -- An update leaves the key alone, so it takes the lock that lets rows that refer to this one still be added.
+    execute format('select %s from %s t where %s for %s', keyturn.image(target.derived), change.relation, locate,
+                   case change.operation when 'update' then 'no key update' else 'update' end) into current_ using change.key;
     if current_ is distinct from change.before then
       result := jsonb_build_object('status', 'stale', 'change', change.seq, 'reason', case
         when change.operation = 'insert' then format('%s already has a row with key %s', change.relation, change.key)
@@ -679,17 +789,21 @@ begin
   begin
     for change in select * from keyturn.changes where proposal_id = p_proposal_id order by seq loop
       select * into target from keyturn.protected where relation = change.relation;
-      locate := keyturn.key_condition(change.relation, target.key_columns);
+      if located is distinct from change.relation::oid then
+        located := change.relation::oid;
+        locate := keyturn.key_condition(change.relation, target.key_columns);
+      end if;
       -- Each write hands back the row as it was written, which is what gets held against the approval.
       written := null;
       if change.operation = 'insert' then
-        execute format('insert into %1$s as t (%2$s) select %2$s from jsonb_populate_record(null::%1$s, $1) returning %3$s',
-          change.relation, (select string_agg(format('%I', name), ', ') from unnest(change.columns) as name), keyturn.image(target.derived)) into written using change.after;
+        execute format('insert into %1$s as t (%2$s) select %2$s from jsonb_to_record($1) as given (%4$s) returning %3$s',
+          change.relation, (select string_agg(format('%I', name), ', ') from unnest(change.columns) as name), keyturn.image(target.derived),
+          keyturn.columns_as(change.relation, change.columns)) into written using change.after;
       elsif change.operation = 'update' then
         -- The row set is one column wide or many; "row" makes the two cases read alike.
-        execute format('update %1$s t set (%2$s) = (select %2$s from jsonb_populate_record(null::%1$s, $2)) where %3$s returning %4$s',
-          change.relation, (select string_agg(format('%I', name), ', ') from unnest(change.columns) as name), locate, keyturn.image(target.derived))
-          into written using change.key, change.after;
+        execute format('update %1$s t set (%2$s) = (select %2$s from jsonb_to_record($2) as given (%5$s)) where %3$s returning %4$s',
+          change.relation, (select string_agg(format('%I', name), ', ') from unnest(change.columns) as name), locate, keyturn.image(target.derived),
+          keyturn.columns_as(change.relation, change.columns)) into written using change.key, change.after;
       else
         execute format('delete from %s t where %s', change.relation, locate) using change.key;
       end if;
@@ -707,6 +821,12 @@ begin
       end if;
     end loop;
   exception when others then
+    -- A lock not got in time, a deadlock, a server short of something: none of these says
+    -- anything about the change. They are passed on, the proposal stays approved, and the
+    -- caller tries again. Only a write the table itself turned down ends the proposal.
+    if left(sqlstate, 2) in ('08', '40', '53', '55', '57', '58', 'XX') then
+      raise;
+    end if;
     result := jsonb_build_object('status', 'failed', 'reason', sqlerrm);
     update keyturn.proposals set status = 'failed', outcome = result, finished_at = clock_timestamp() where id = p_proposal_id;
     perform keyturn.audit_append(p_proposal_id, 'failed', result);
@@ -724,7 +844,7 @@ end $$;
 -- proposal whose last entry is not where the proposal now stands.
 create function keyturn.verify_audit() returns table (proposal_id uuid, problem text)
   language plpgsql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   entry    keyturn.audit;
@@ -757,7 +877,7 @@ end $$;
 -- switch the log's own guards off.
 create function keyturn.audit_head() returns table (entries bigint, head text)
   language sql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
     select count(*), encode(sha256(convert_to(coalesce(string_agg(hash, '' order by seq), ''), 'UTF8')), 'hex') from keyturn.audit
   $$;
@@ -774,6 +894,12 @@ create policy own_or_approver on keyturn.proposals for select
 create policy own_or_approver on keyturn.changes for select
   using (pg_has_role(session_user, 'keyturn_approver', 'MEMBER')
          or exists (select from keyturn.proposals where proposals.id = changes.proposal_id and proposals.proposed_by = session_user));
+
+-- The list of protected tables holds each one's columns and types. An agent sees the
+-- entries for tables it may read, and learns nothing here about the others.
+alter table keyturn.protected enable row level security;
+create policy readable on keyturn.protected for select
+  using (pg_has_role(session_user, 'keyturn_approver', 'MEMBER') or has_table_privilege(session_user, relation, 'SELECT'));
 
 -- The audit log is read the way proposals are: an agent its own, an approver all of it.
 alter table keyturn.audit enable row level security;

@@ -9,22 +9,42 @@ import type { ColumnDiff, Extent, Finding, Proposal, RowDiff } from "./keyturn.t
 export function plain(text: string): string {
   let result = "";
   for (const character of text) {
-    const code = character.codePointAt(0) as number;
-    result += hidden(code) ? `\\u{${code.toString(16)}}` : character;
+    result += hidden(character)
+      ? `\\u{${(character.codePointAt(0) as number).toString(16)}}`
+      : character;
   }
   return result;
 }
 
-/** Control characters but tab and line feed, and the characters that hide or reorder text. */
-function hidden(code: number): boolean {
-  return (
-    (code < 0x20 && code !== 0x09 && code !== 0x0a) ||
-    (code >= 0x7f && code <= 0x9f) ||
-    (code >= 0x200b && code <= 0x200f) ||
-    (code >= 0x2028 && code <= 0x202e) ||
-    (code >= 0x2060 && code <= 0x206f) ||
-    code === 0xfeff
-  );
+// Control characters (but tab and line feed), format characters such as the ones that
+// reverse direction or join and hide, private-use and unassigned code points, line and
+// paragraph separators, the blank "filler" letters, and variation selectors.
+//
+// The review page has the same rule in review/hidden.js. A test holds the two together over
+// every code point.
+const pattern = /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Cn}\p{Zl}\p{Zp}]|͏|ᅟ|ᅠ|ㅤ|ﾠ|\p{Variation_Selector}/u;
+
+/** Whether a character, given as a string of one code point, is one a reader would not see for what it is. */
+export function hidden(character: string): boolean {
+  return character !== "\t" && character !== "\n" && pattern.test(character);
+}
+
+/**
+ * JSON for a terminal or a log. Standard JSON leaves most invisible characters as they are;
+ * here each is written as an escape, which any JSON reader turns back into the character.
+ */
+export function json(value: unknown): string {
+  let result = "";
+  for (const character of JSON.stringify(value, null, 2)) {
+    if (!hidden(character)) {
+      result += character;
+      continue;
+    }
+    for (let index = 0; index < character.length; index += 1) {
+      result += `\\u${character.charCodeAt(index).toString(16).padStart(4, "0")}`;
+    }
+  }
+  return result;
 }
 
 export interface Style {
@@ -77,10 +97,10 @@ export function standing(proposal: Proposal, now: Date = new Date()): string {
     return `${proposal.status}, expired ${ago(proposal.expiresAt, now)} ago`;
   }
   if (proposal.status === "pending" || proposal.status === "approved") {
-    const by = proposal.decidedBy === null ? "" : ` by ${proposal.decidedBy}`;
+    const by = proposal.decidedBy === null ? "" : ` by ${plain(proposal.decidedBy)}`;
     return `${proposal.status}${by}, expires in ${ago(proposal.expiresAt, now)}`;
   }
-  const by = proposal.decidedBy === null ? "" : `, decided by ${proposal.decidedBy}`;
+  const by = proposal.decidedBy === null ? "" : `, decided by ${plain(proposal.decidedBy)}`;
   return `${proposal.status}${by}`;
 }
 
@@ -122,7 +142,7 @@ export function renderProposal(
 
   for (const row of rows) {
     const key = Object.entries(row.key)
-      .map(([name, part]) => `${plain(name)} = ${plain(JSON.stringify(part))}`)
+      .map(([name, part]) => `${plain(name)} = ${part === null ? "null" : plain(part)}`)
       .join(", ");
     lines.push(
       `${paint(style, "dim", `#${row.seq}`)} ${paint(style, "bold", row.operation)} ${plain(row.table)}  ${key}`,

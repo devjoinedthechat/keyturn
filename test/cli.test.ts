@@ -5,7 +5,7 @@ import type pg from "pg";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { type Io, run } from "../src/cli.ts";
 import { Keyturn } from "../src/index.ts";
-import { Database, logins } from "./database.ts";
+import { administrator, Database, logins } from "./database.ts";
 
 let database: Database;
 let owner: pg.Client;
@@ -111,7 +111,7 @@ describe("from the terminal", () => {
     // Someone who reads it and does not type the word leaves it as it was.
     const declined = await keyturn(logins.alice, ["approve", made.id], ["y"]);
     expect(declined.code).toBe(1);
-    expect(declined.asked[0]).toContain("all 2 of these changes");
+    expect(declined.asked[0]).toContain("Approve these 2 changes?");
     expect(declined.out).toContain(made.contentHash);
     expect((await agent.proposal(made.id))?.status).toBe("pending");
 
@@ -210,8 +210,17 @@ describe("from the terminal", () => {
     expect(next.out).toContain("#150 delete");
     expect(next.out).not.toContain("are shown");
 
-    const asked = await keyturn(logins.alice, ["approve", made.id], ["no"]);
-    expect(asked.asked[0]).toContain("all 150 of these changes");
+    // Rows that were not on the screen are not approved by habit: the word is not enough, the number is asked for.
+    const habit = await keyturn(logins.alice, ["approve", made.id], ["approve"]);
+    expect(habit.asked[0]).toContain("50 of 150 changes were shown");
+    expect(habit.asked[0]).toContain("type that number");
+    expect(habit.code).toBe(1);
+    expect((await agent.proposal(made.id))?.status).toBe("pending");
+    const wrong = await keyturn(logins.alice, ["approve", made.id], ["149"]);
+    expect(wrong.code).toBe(1);
+    // With every row on the screen, the word is asked for as usual.
+    const whole = await keyturn(logins.alice, ["approve", made.id, "--rows", "200"], ["no"]);
+    expect(whole.asked[0]).toContain("Approve these 150 changes?");
     await keyturn(logins.alice, ["reject", made.id]);
   });
 
@@ -277,6 +286,107 @@ describe("from the terminal", () => {
     expect(page.status).toBe(200);
     expect(page.listed).toBeGreaterThan(2);
     expect((await keyturn(logins.alice, ["review", "--port", "http"])).code).toBe(2);
+  });
+
+  test("approves rows it did not show when their number is typed", async () => {
+    const made = await agent.propose(
+      Array.from({ length: 12 }, (_, index) => ({
+        table: "orders",
+        operation: "update" as const,
+        key: { id: 181 + index },
+        set: { status: "held" },
+      })),
+    );
+    const total = (await agent.proposal(made.id))?.changes as number;
+    const typed = await keyturn(logins.alice, ["approve", made.id, "--rows", "5"], [String(total)]);
+    expect(typed.asked[0]).toContain(`5 of ${total} changes were shown`);
+    expect(typed.code).toBe(0);
+    expect((await agent.proposal(made.id))?.status).toBe("approved");
+  });
+
+  test("says what is wrong with a command before it looks for a database", async () => {
+    const nowhere = async (args: string[]) => {
+      const err: string[] = [];
+      const code = await run(args, {
+        env: { KEYTURN_URL: "postgres://nobody@127.0.0.1:1/none" },
+        out: () => {},
+        err: (text) => err.push(text),
+        color: false,
+      });
+      return { code, err: err.join("\n") };
+    };
+    expect(await nowhere(["frobnicate"])).toMatchObject({ code: 2 });
+    expect((await nowhere(["approve"])).err).toContain("needs a proposal");
+    expect((await nowhere(["protect"])).code).toBe(2);
+    expect((await nowhere(["list"])).err).toContain("Could not connect");
+    const malformed = await run(["list", "--url", "not a url at all"], {
+      env: {},
+      out: () => {},
+      err: () => {},
+      color: false,
+    });
+    expect(malformed).toBe(1);
+  });
+
+  test("prints what a table's own trigger said without letting it repaint the terminal", async () => {
+    const esc = String.fromCharCode(27);
+    await owner.query(`
+      create table guarded (id integer primary key, v text);
+      insert into guarded values (1, 'a');
+      create function refuse_v() returns trigger language plpgsql as $$ begin raise exception 'value % is not allowed', new.v; end $$;
+      create trigger refuse_v before update on guarded for each row execute function refuse_v();
+      select keyturn.protect('guarded');
+      grant select on guarded to keyturn_agent, keyturn_approver;
+    `);
+    const made = await agent.propose([
+      {
+        table: "guarded",
+        operation: "update",
+        key: { id: 1 },
+        set: { v: `x${esc}[2J${esc}[31mapproved` },
+      },
+    ]);
+    const applied = await keyturn(logins.alice, [
+      "approve",
+      made.id,
+      "--hash",
+      made.contentHash,
+      "--apply",
+    ]);
+    expect(applied.code).toBe(1);
+    expect(applied.out).toContain("The proposal is failed");
+    expect(applied.out).toContain("\\u{1b}[2J");
+    expect(applied.out + applied.err).not.toContain(esc);
+    const again = await keyturn(logins.agent, ["apply", made.id]);
+    expect(again.out + again.err).not.toContain(esc);
+    const asJson = await keyturn(logins.alice, ["show", made.id, "--json"]);
+    expect(asJson.out).not.toContain(esc);
+    expect(
+      JSON.parse(asJson.out).rows[0].columns.find((c: { column: string }) => c.column === "v")
+        .after,
+    ).toContain(esc);
+  });
+
+  test("ends, and says so, when the database goes away under the review page", async () => {
+    const admin = await administrator(database);
+    const err: string[] = [];
+    const out: string[] = [];
+    const code = await run(["review"], {
+      env: { KEYTURN_URL: database.url(logins.bob) },
+      out: (text) => out.push(text),
+      err: (text) => err.push(text),
+      color: false,
+      until: async () => {
+        await admin.query(
+          "select pg_terminate_backend(pid) from pg_stat_activity where usename = $1 and datname = current_database()",
+          [logins.bob],
+        );
+        // The page would be told to stop only by a person; the lost connection has to do it.
+        await new Promise(() => {});
+      },
+    });
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("connection to the database was lost");
   });
 
   test("never prints the password it connected with", async () => {

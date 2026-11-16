@@ -35,10 +35,11 @@
     "bench": "node bench/overhead.ts",
     "check:secrets": "scripts/check-secrets.sh --all",
     "prepare": "git config core.hooksPath .githooks || true",
-    "demo": "node demo/run.ts"
+    "demo": "node demo/run.ts",
+    "prepack": "pnpm build"
   },
   "dependencies": {
-    "pg": "8.23.1"
+    "pg": "^8.23.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",

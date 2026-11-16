@@ -14,9 +14,9 @@ create function keyturn.diff(p_proposal_id uuid, p_from integer default 1, p_cou
   returns table (seq integer, relation text, operation text, key jsonb, column_name text,
                  before text, after text, before_kind text, after_kind text, changed boolean)
   language sql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
-    select c.seq, c.relation::text, c.operation, c.key, col.name,
+    select c.seq, c.relation_name, c.operation, c.key, col.name,
            (c.before -> col.name) #>> '{}', (c.after -> col.name) #>> '{}',
            coalesce(jsonb_typeof(c.before -> col.name), 'absent'), coalesce(jsonb_typeof(c.after -> col.name), 'absent'),
            (c.before -> col.name) is distinct from (c.after -> col.name)
@@ -32,9 +32,9 @@ create function keyturn.diff(p_proposal_id uuid, p_from integer default 1, p_cou
 create function keyturn.extent(p_proposal_id uuid)
   returns table (relation text, operation text, row_count bigint)
   language sql stable
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
-    select c.relation::text, c.operation, count(*)
+    select c.relation_name, c.operation, count(*)
       from keyturn.changes c
      where c.proposal_id = p_proposal_id
      group by 1, 2

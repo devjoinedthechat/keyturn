@@ -1,6 +1,8 @@
 // The review page. Everything an agent wrote reaches the screen through textContent: a
 // note or a value is text here, whatever it contains.
 
+import { hidden } from "/hidden.js";
+
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const state = {
@@ -8,57 +10,91 @@ const state = {
   me: null,
   view: "waiting",
   list: [],
+  more: false,
   id: null,
   proposal: null,
   extent: [],
   history: [],
   rows: [],
-  // The hash of the content as it was when its rows were put on the screen. An approval sends this one.
+  // The hash of the content whose rows are on the screen. An approval sends this one. Null
+  // when the content changed after it was read: there is then nothing on the screen to approve.
   readHash: null,
-  changedSince: false,
   mode: "idle",
   refused: null,
   busy: false,
+  loading: false,
   unchanged: new Set(),
+  // When the confirming button may first be pressed.
+  armedAt: 0,
 };
 
 const queue = document.getElementById("queue");
 const sheet = document.getElementById("sheet");
 const keys = document.getElementById("keys");
 const said = document.getElementById("said");
+const lost = document.getElementById("lost");
 
 /** The key for this run comes in the address, once. It is kept for the tab and taken out of the address bar. */
 function takeKey() {
   const given = location.hash.slice(1);
+  const fits = /^[A-Za-z0-9_-]{24,}$/.test(given) && !uuid.test(given);
   let key = null;
   try {
-    if (/^[A-Za-z0-9_-]{24,}$/.test(given) && !uuid.test(given)) {
+    if (fits) {
       sessionStorage.setItem("keyturn-key", given);
       history.replaceState(null, "", location.pathname);
     }
     key = sessionStorage.getItem("keyturn-key");
   } catch {
-    key = /^[A-Za-z0-9_-]{24,}$/.test(given) ? given : null;
+    key = fits ? given : null;
   }
   return key;
 }
 
 async function api(path, body) {
-  const response = await fetch(`/api/${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      authorization: `Bearer ${state.key}`,
-      ...(body === undefined ? {} : { "content-type": "application/json" }),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const data = await response.json().catch(() => ({ error: "The review page did not answer." }));
+  let response;
+  try {
+    response = await fetch(`/api/${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        authorization: `Bearer ${state.key}`,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    contact(
+      "This page has lost contact with keyturn review. What is shown may be out of date. Check that it is still running in the terminal.",
+    );
+    throw new Error("No contact with keyturn review.");
+  }
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    contact(
+      "keyturn review was started again, and this page belongs to the earlier run. Open the address the terminal printed.",
+    );
+  } else if (response.status >= 500) {
+    contact("keyturn review cannot reach the database. What is shown may be out of date.");
+  } else {
+    contact(null);
+  }
   if (!response.ok) {
     const problem = new Error(data.error ?? "The review page did not answer.");
     problem.status = response.status;
     throw problem;
   }
   return data;
+}
+
+/** Says, across the top, that what is on the page can no longer be trusted to be current. */
+function contact(message) {
+  lost.hidden = message === null;
+  lost.textContent = message ?? "";
+  if (message !== null) {
+    // Nothing is approved from a page that cannot say what is current.
+    state.mode = "idle";
+    drawKeys();
+  }
 }
 
 /** An element. Children that are strings become text. */
@@ -81,33 +117,16 @@ function el(tag, attributes = {}, ...children) {
   return node;
 }
 
-/** Characters that hide, or that turn the text after them round. Shown as their code. */
-function hidden(code) {
-  return (
-    (code < 0x20 && code !== 0x09 && code !== 0x0a) ||
-    (code >= 0x7f && code <= 0x9f) ||
-    (code >= 0x200b && code <= 0x200f) ||
-    (code >= 0x2028 && code <= 0x202e) ||
-    (code >= 0x2060 && code <= 0x206f) ||
-    code === 0xfeff
-  );
-}
+const chip = (text, title) => el("span", { class: "code", title }, text);
 
 /** Text an agent wrote, with nothing in it left unseen. */
 function written(text) {
   const parts = document.createDocumentFragment();
   let run = "";
   for (const character of text) {
-    const code = character.codePointAt(0);
-    if (hidden(code)) {
-      parts.append(
-        run,
-        el(
-          "span",
-          { class: "code", title: "A character that does not show" },
-          `U+${code.toString(16).toUpperCase().padStart(4, "0")}`,
-        ),
-      );
+    if (hidden(character)) {
+      const code = character.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+      parts.append(run, chip(`U+${code}`, "A character that does not show"));
       run = "";
     } else {
       run += character;
@@ -117,34 +136,67 @@ function written(text) {
   return parts;
 }
 
+/**
+ * A value's text, with the white space a reader cannot otherwise see: spaces and tabs at
+ * either end, and every line break. "a" and "a " are different values, and look the same.
+ */
+function exact(text) {
+  const parts = document.createDocumentFragment();
+  const lead = /^[ \t]+/.exec(text)?.[0] ?? "";
+  const rest = text.slice(lead.length);
+  const trail = rest === "" ? "" : (/[ \t]+$/.exec(rest)?.[0] ?? "");
+  const middle = rest.slice(0, rest.length - trail.length);
+  const blanks = (run) => {
+    for (const character of run) {
+      parts.append(
+        chip(character === "\t" ? "tab" : "space", "White space at the end of the value"),
+      );
+    }
+  };
+  blanks(lead);
+  middle.split("\n").forEach((line, index, lines) => {
+    // Spaces before a line break are as invisible as spaces at the end.
+    const tail = index < lines.length - 1 ? (/[ \t]+$/.exec(line)?.[0] ?? "") : "";
+    parts.append(written(line.slice(0, line.length - tail.length)));
+    blanks(tail);
+    if (index < lines.length - 1) {
+      parts.append(chip("line break", "A line break in the value"), "\n");
+    }
+  });
+  blanks(trail);
+  return parts;
+}
+
 const clamp = 600;
 
-/** One value, as the database wrote it. */
-function value(text, kind) {
+/** One value, as the database wrote it. `other` is the kind on the other side of a change. */
+function value(text, kind, other) {
   if (kind === "absent") {
     return el("span", { class: "chip" }, "not given");
   }
   if (kind === "null" || text === null) {
     return el("span", { class: "chip" }, "null");
   }
+  const holder = el("span", {});
+  // The text 100 and the number 100 are written alike. Where a change turns one into the other, each says which it is.
+  if (other !== undefined && other !== kind && other !== "absent" && other !== "null") {
+    holder.append(el("span", { class: "chip" }, `${kind === "string" ? "text" : kind} `));
+  }
   if (text === "") {
-    return el("span", { class: "chip" }, "empty text");
+    holder.append(el("span", { class: "chip" }, "empty text"));
+  } else if (text.length <= clamp) {
+    holder.append(exact(text));
+  } else {
+    const short = el("span", {}, exact(text.slice(0, clamp)), "… ");
+    short.append(
+      el(
+        "button",
+        { type: "button", class: "link", on: { click: () => short.replaceChildren(exact(text)) } },
+        `show all ${text.length.toLocaleString("en")} characters`,
+      ),
+    );
+    holder.append(short);
   }
-  if (text.length <= clamp) {
-    return written(text);
-  }
-  const holder = el("span", {}, written(text.slice(0, clamp)), "… ");
-  holder.append(
-    el(
-      "button",
-      {
-        type: "button",
-        class: "link",
-        on: { click: () => holder.replaceChildren(written(text)) },
-      },
-      `show all ${text.length.toLocaleString("en")} characters`,
-    ),
-  );
   return holder;
 }
 
@@ -164,14 +216,18 @@ function ago(when, now = Date.now()) {
   return `${amount} ${unit}${amount === 1 ? "" : "s"}`;
 }
 
-const many = (count, word) => `${count.toLocaleString("en")} ${word}${count === 1 ? "" : "s"}`;
-
-function standing(proposal) {
-  if (proposal.expired) {
-    return "expired";
-  }
-  return proposal.status;
+/** A time as "5 minutes ago" or "in 23 hours", with the exact time for whoever points at it. */
+function when(moment, future) {
+  const text = future ? `in ${ago(moment)}` : `${ago(moment)} ago`;
+  return el(
+    "time",
+    { datetime: new Date(moment).toISOString(), title: new Date(moment).toLocaleString() },
+    text,
+  );
 }
+
+const many = (count, word) => `${count.toLocaleString("en")} ${word}${count === 1 ? "" : "s"}`;
+const standing = (proposal) => (proposal.expired ? "expired" : proposal.status);
 
 // ---------------------------------------------------------------- the queue
 
@@ -192,50 +248,66 @@ function drawQueue() {
     );
     return;
   }
-  queue.replaceChildren(
-    ...state.list.map((proposal) => {
-      const parts = el("span", { class: "parts" });
-      proposal.extent.forEach((part, index) => {
-        if (index > 0) {
-          parts.append(", ");
-        }
-        parts.append(
-          el(
-            "span",
-            { class: part.operation === "delete" ? "gone" : "" },
-            `${many(part.rows, part.operation)} in ${part.table}`,
-          ),
-        );
-      });
-      return el(
-        "button",
-        {
-          type: "button",
-          "aria-current": proposal.id === state.id ? "true" : null,
-          on: { click: () => open(proposal.id) },
-        },
-        el("span", { class: "size" }, many(proposal.changes, "row")),
-        parts,
+  const items = state.list.map((proposal) => {
+    const parts = el("span", { class: "parts" });
+    proposal.extent.forEach((part, index) => {
+      if (index > 0) {
+        parts.append(", ");
+      }
+      parts.append(
         el(
           "span",
-          { class: "from" },
-          written(
-            `${proposal.proposedBy}, ${ago(proposal.proposedAt)} ago${state.view === "decided" ? `, ${standing(proposal)}` : ""}`,
-          ),
+          { class: part.operation === "delete" ? "gone" : "" },
+          `${many(part.rows, part.operation)} in `,
+          written(part.table),
         ),
-        proposal.note === ""
-          ? null
-          : el("span", { class: "words" }, written(proposal.note.replace(/\s+/g, " "))),
       );
-    }),
-  );
+    });
+    return el(
+      "button",
+      {
+        type: "button",
+        "aria-current": proposal.id === state.id ? "true" : null,
+        on: { click: () => open(proposal.id) },
+      },
+      el("span", { class: "size" }, many(proposal.changes, "row")),
+      parts,
+      el(
+        "span",
+        { class: "from" },
+        written(proposal.proposedBy),
+        ", ",
+        when(proposal.proposedAt, false),
+        state.view === "decided" ? `, ${standing(proposal)}` : "",
+      ),
+      proposal.note === ""
+        ? null
+        : el("span", { class: "words" }, written(proposal.note.replace(/\s+/g, " "))),
+    );
+  });
+  if (state.more) {
+    items.push(
+      el(
+        "p",
+        { class: "none" },
+        "Only the first 200 are listed. The rest appear as these are decided.",
+      ),
+    );
+  }
+  queue.replaceChildren(...items);
 }
 
 async function loadList() {
-  const data = await api(`proposals?show=${state.view}`);
+  const view = state.view;
+  const data = await api(`proposals?show=${view}`);
+  if (state.view !== view) {
+    return;
+  }
   state.list = data.proposals;
-  if (state.view === "waiting") {
-    document.getElementById("count-waiting").textContent = String(state.list.length);
+  state.more = data.more;
+  if (view === "waiting") {
+    document.getElementById("count-waiting").textContent =
+      `${state.list.length}${state.more ? "+" : ""}`;
   }
   drawQueue();
 }
@@ -263,29 +335,25 @@ function drawSheet() {
       ? el("p", { class: "note absent" }, "No note was given with this proposal.")
       : el("p", { class: "note" }, written(proposal.note)),
   );
+  const open_ = proposal.status === "pending" || proposal.status === "approved";
   parts.push(
     el(
       "p",
       { class: "said-by" },
       written(proposal.proposedBy),
-      ` proposed this ${ago(proposal.proposedAt)} ago. `,
-      proposal.status === "pending" || proposal.status === "approved"
-        ? proposal.expired
-          ? `It expired ${ago(proposal.expiresAt)} ago.`
-          : `It expires in ${ago(proposal.expiresAt)}.`
-        : "",
+      " proposed this ",
+      when(proposal.proposedAt, false),
+      ". ",
+      ...(open_
+        ? [
+            proposal.expired ? "It expired " : "It expires ",
+            when(proposal.expiresAt, !proposal.expired),
+            ".",
+          ]
+        : []),
     ),
   );
 
-  if (state.changedSince) {
-    parts.push(
-      el(
-        "p",
-        { class: "banner" },
-        "This proposal changed after you opened it. What is below is how it stands; read it again.",
-      ),
-    );
-  }
   if (proposal.outcome?.reason) {
     parts.push(
       el("p", { class: "banner" }, "Nothing was written: ", written(proposal.outcome.reason)),
@@ -301,37 +369,42 @@ function drawSheet() {
           "li",
           { class: part.operation === "delete" ? "gone" : "" },
           el("span", { class: "figure" }, many(part.rows, part.operation)),
-          el("span", { class: "what" }, `in ${part.table}`),
+          el("span", { class: "what" }, "in ", written(part.table)),
         ),
       ),
     ),
   );
 
-  parts.push(
-    el(
-      "ol",
-      { class: "steps", "aria-label": "What has happened to this proposal" },
-      ...state.history.map((step) =>
-        el(
-          "li",
-          {},
-          el("b", {}, step.event === "approved_by_rule" ? "let through by a rule" : step.event),
-          " by ",
-          written(
-            step.event === "approved_by_rule"
-              ? Object.keys(step.detail.rules ?? {}).join(", ")
-              : step.actor,
+  // One entry says only that it was proposed, which the line above already says.
+  if (state.history.length > 1) {
+    parts.push(
+      el(
+        "ol",
+        { class: "steps", "aria-label": "What has happened to this proposal" },
+        ...state.history.map((step) =>
+          el(
+            "li",
+            {},
+            el("b", {}, step.event === "approved_by_rule" ? "let through by a rule" : step.event),
+            " by ",
+            written(
+              step.event === "approved_by_rule"
+                ? Object.keys(step.detail.rules ?? {}).join(", ")
+                : step.actor,
+            ),
+            ", ",
+            when(step.at, false),
           ),
-          `, ${ago(step.at)} ago`,
         ),
       ),
-    ),
-  );
+    );
+  }
 
   parts.push(...drawRows());
 
   const last = state.rows.at(-1)?.seq ?? 0;
-  if (last < proposal.changes) {
+  const left = proposal.changes - last;
+  if (left > 0) {
     parts.push(
       el(
         "p",
@@ -339,9 +412,26 @@ function drawSheet() {
         `${last.toLocaleString("en")} of ${many(proposal.changes, "row")} are on the page.`,
         el(
           "button",
-          { type: "button", class: "link", on: { click: () => more() } },
-          `Show the next ${Math.min(100, proposal.changes - last)}`,
+          {
+            type: "button",
+            class: "link",
+            disabled: state.loading,
+            on: { click: () => more(100) },
+          },
+          `Show the next ${Math.min(100, left).toLocaleString("en")}`,
         ),
+        left > 100
+          ? el(
+              "button",
+              {
+                type: "button",
+                class: "link",
+                disabled: state.loading,
+                on: { click: () => more(1000) },
+              },
+              `Show the next ${Math.min(1000, left).toLocaleString("en")}`,
+            )
+          : null,
       ),
     );
   }
@@ -356,7 +446,7 @@ function drawRows() {
     const row = state.rows[index];
     if (row.table !== table) {
       table = row.table;
-      parts.push(el("h2", { class: "table-name" }, el("b", {}, table)));
+      parts.push(el("h2", { class: "table-name" }, el("b", {}, written(table))));
     }
     if (row.operation === "update") {
       parts.push(drawUpdate(row));
@@ -377,14 +467,24 @@ function drawRows() {
   return parts;
 }
 
-function keyText(key) {
-  return Object.entries(key)
-    .map(([name, part]) => `${name} ${typeof part === "string" ? part : JSON.stringify(part)}`)
-    .join(", ");
+/** A row's key, each part apart from the next, so that a comma inside a value is not read as the end of it. */
+function keyParts(key) {
+  const parts = document.createDocumentFragment();
+  Object.entries(key).forEach(([name, part], index) => {
+    if (index > 0) {
+      parts.append(el("span", { class: "chip" }, " and "));
+    }
+    parts.append(
+      el("span", { class: "key-name" }, written(name)),
+      " ",
+      part === null ? el("span", { class: "chip" }, "null") : exact(part),
+    );
+  });
+  return parts;
 }
 
 function drawUpdate(row) {
-  const open = state.unchanged.has(row.seq);
+  const open_ = state.unchanged.has(row.seq);
   const same = row.columns.filter((column) => !column.changed);
   const body = el("tbody");
   for (const column of row.columns) {
@@ -394,12 +494,12 @@ function drawUpdate(row) {
           "tr",
           {},
           el("th", { scope: "row" }, written(column.column)),
-          el("td", { class: "was" }, value(column.before, column.beforeKind)),
+          el("td", { class: "was" }, value(column.before, column.beforeKind, column.afterKind)),
           el("td", { class: "arrow", "aria-label": "becomes" }, "→"),
-          el("td", { class: "now" }, value(column.after, column.afterKind)),
+          el("td", { class: "now" }, value(column.after, column.afterKind, column.beforeKind)),
         ),
       );
-    } else if (open) {
+    } else if (open_) {
       body.append(
         el(
           "tr",
@@ -418,7 +518,7 @@ function drawUpdate(row) {
       { class: "row-key" },
       el("span", { class: "seq" }, `#${row.seq}`),
       " update ",
-      written(keyText(row.key)),
+      keyParts(row.key),
     ),
     el("table", { class: "pairs" }, body),
     same.length === 0
@@ -428,19 +528,21 @@ function drawUpdate(row) {
           {
             type: "button",
             class: "link",
-            "aria-expanded": String(open),
+            "aria-expanded": String(open_),
             on: {
               click: () => {
-                if (open) {
+                if (open_) {
                   state.unchanged.delete(row.seq);
                 } else {
                   state.unchanged.add(row.seq);
                 }
+                const top = sheet.scrollTop;
                 drawSheet();
+                sheet.scrollTop = top;
               },
             },
           },
-          open
+          open_
             ? "Hide what stays the same"
             : `${many(same.length, "column")} stay${same.length === 1 ? "s" : ""} the same`,
         ),
@@ -459,7 +561,12 @@ function drawGrid(rows, operation) {
   const side = operation === "insert" ? "after" : "before";
   return el(
     "div",
-    { class: "scroll" },
+    {
+      class: "scroll",
+      tabindex: "0",
+      role: "group",
+      "aria-label": `${many(rows.length, "row")} to ${operation}`,
+    },
     el(
       "table",
       { class: `grid ${operation}` },
@@ -533,31 +640,89 @@ function drawKeys() {
     second.append(el("p", { class: turned ? "label turned" : "label" }, text));
   const total = proposal.changes;
   const seen = state.rows.length;
+  const decider =
+    proposal.decidedBy === "keyturn_rule" ? "A rule let this through; no person decided. " : null;
 
   if (proposal.status === "pending" && proposal.expired) {
     label("Second key, never turned", false);
     second.append(el("p", {}, "Nobody decided before it expired. Nothing was written."));
+  } else if (proposal.status === "pending" && !lost.hidden) {
+    label("Second key", false);
+    second.append(
+      el("p", {}, "Nothing can be decided from this page until it is in contact again."),
+    );
   } else if (proposal.status === "pending" && !state.me.approver) {
     label("Second key", false);
     second.append(
       el(
         "p",
         {},
-        written(`${state.me.login} cannot approve. Start the page as a login in keyturn_approver.`),
+        written(state.me.login),
+        " cannot approve. Start the page as a login in keyturn_approver.",
       ),
     );
   } else if (proposal.status === "pending" && proposal.proposedBy === state.me.login) {
     label("Second key", false);
     second.append(el("p", {}, "You proposed this. Someone else has to approve it."));
-  } else if (proposal.status === "pending" && state.mode === "approve") {
+  } else if (proposal.status === "pending" && state.readHash === null) {
     label("Second key", false);
     second.append(
       el(
         "p",
+        { class: "refused" },
+        "This proposal changed after you opened it. What you read is not what would be approved.",
+      ),
+      el(
+        "div",
+        { class: "acts" },
+        el(
+          "button",
+          { type: "button", class: "act", id: "reread", on: { click: () => open(proposal.id) } },
+          "Read it again",
+        ),
+      ),
+    );
+  } else if (proposal.status === "pending" && state.mode === "approve") {
+    label("Second key", false);
+    const unseen = seen < total;
+    const count = unseen
+      ? el("input", {
+          id: "count",
+          type: "text",
+          inputmode: "numeric",
+          autocomplete: "off",
+          "aria-label": `Type ${total} to approve all ${total} changes`,
+        })
+      : null;
+    const confirm = el(
+      "button",
+      {
+        type: "button",
+        class: "act turn",
+        id: "confirm-approve",
+        disabled: true,
+        on: { click: approve },
+      },
+      total === 1 ? "Approve" : `Approve all ${total.toLocaleString("en")}`,
+    );
+    // The confirming button cannot be pressed in the first moment: a second click meant for
+    // the button that was here before must not land on it. Rows nobody has put on the page
+    // are approved by typing their number.
+    const settle = () => {
+      const typed = count === null || count.value.replace(/[\s,.]/g, "") === String(total);
+      confirm.disabled = state.busy || Date.now() < state.armedAt || !typed;
+    };
+    count?.addEventListener("input", settle);
+    setTimeout(settle, Math.max(0, state.armedAt - Date.now()) + 20);
+    second.append(
+      el(
+        "p",
         { class: "ask" },
-        seen < total
-          ? `You have ${many(seen, "row")} of ${total.toLocaleString("en")} on the page. Approving covers all ${total.toLocaleString("en")}.`
-          : `Approve ${total === 1 ? "this change" : `these ${total.toLocaleString("en")} changes`} as ${state.me.login}?`,
+        unseen
+          ? `${many(seen, "row")} of ${total.toLocaleString("en")} are on the page. Approving covers all ${total.toLocaleString("en")}. To approve rows you have not read, type their number: `
+          : `Approve ${total === 1 ? "this change" : `these ${total.toLocaleString("en")} changes`} as `,
+        unseen ? count : written(state.me.login),
+        unseen ? "" : "?",
       ),
       el(
         "div",
@@ -566,18 +731,20 @@ function drawKeys() {
           "button",
           {
             type: "button",
-            class: "act turn",
-            id: "confirm-approve",
-            disabled: state.busy,
-            on: { click: approve },
+            class: "act",
+            id: "not-yet",
+            on: {
+              // The second click of a double click lands here, where the first button was. It is not a decision to go back.
+              click: (event) => {
+                if (event.detail < 2) {
+                  setMode("idle");
+                }
+              },
+            },
           },
-          total === 1 ? "Approve" : `Approve all ${total.toLocaleString("en")}`,
-        ),
-        el(
-          "button",
-          { type: "button", class: "act", on: { click: () => setMode("idle") } },
           "Not yet",
         ),
+        confirm,
       ),
     );
   } else if (proposal.status === "pending" && state.mode === "reject") {
@@ -585,6 +752,7 @@ function drawKeys() {
     const reason = el("textarea", {
       id: "reason",
       maxlength: "2000",
+      placeholder: "Why. The agent reads this, and it stays on record.",
       "aria-label": "Why it is rejected, for the record and the agent",
     });
     second.append(
@@ -592,6 +760,11 @@ function drawKeys() {
       el(
         "div",
         { class: "acts" },
+        el(
+          "button",
+          { type: "button", class: "act", on: { click: () => setMode("idle") } },
+          "Not yet",
+        ),
         el(
           "button",
           {
@@ -602,11 +775,6 @@ function drawKeys() {
             on: { click: () => reject(reason.value) },
           },
           "Reject",
-        ),
-        el(
-          "button",
-          { type: "button", class: "act", on: { click: () => setMode("idle") } },
-          "Not yet",
         ),
       ),
     );
@@ -639,13 +807,11 @@ function drawKeys() {
       el(
         "p",
         {},
-        proposal.decidedBy === "keyturn_rule"
-          ? "A rule let this through; no person decided. "
-          : written(`${proposal.decidedBy} approved this. `),
+        decider ?? written(`${proposal.decidedBy} approved this. `),
         proposal.expired ? "It expired before it was applied." : "The agent can apply it.",
       ),
     );
-    if (!proposal.expired) {
+    if (!proposal.expired && lost.hidden) {
       second.append(
         el(
           "div",
@@ -670,9 +836,7 @@ function drawKeys() {
       el(
         "p",
         {},
-        proposal.decidedBy === "keyturn_rule"
-          ? "A rule let this through; no person decided. "
-          : written(`${proposal.decidedBy} approved this. `),
+        decider ?? written(`${proposal.decidedBy} approved this. `),
         `Applied: ${many(proposal.outcome?.changes ?? total, "row")} written.`,
       ),
     );
@@ -693,9 +857,8 @@ function drawKeys() {
       el(
         "p",
         {},
-        written(
-          `${proposal.decidedBy} approved this, and nothing was written: the proposal is ${proposal.status}.`,
-        ),
+        decider ?? written(`${proposal.decidedBy} approved this. `),
+        `Nothing was written: the proposal is ${proposal.status}.`,
       ),
     );
   }
@@ -710,29 +873,44 @@ function drawKeys() {
 function setMode(mode) {
   state.mode = mode;
   state.refused = null;
+  state.armedAt = Date.now() + 700;
   drawKeys();
-  const focus = { approve: "confirm-approve", reject: "reason", idle: "approve" }[mode];
+  const focus = {
+    approve: state.rows.length < (state.proposal?.changes ?? 0) ? "count" : "not-yet",
+    reject: "reason",
+    idle: "approve",
+  }[mode];
   document.getElementById(focus)?.focus();
 }
 
+/** Decides or applies the open proposal. An answer that comes back after another was opened is not painted over it. */
 async function act(path, body, done) {
+  const id = state.id;
   state.busy = true;
   state.refused = null;
   drawKeys();
+  let data = null;
+  let refusal = null;
   try {
-    const data = await api(`proposals/${state.id}/${path}`, body);
-    state.proposal = data.proposal;
-    state.history = data.history;
-    state.mode = "idle";
-    said.textContent = done(data.proposal);
+    data = await api(`proposals/${id}/${path}`, body);
   } catch (problem) {
-    state.refused = problem.message;
-    said.textContent = `Refused: ${problem.message}`;
-  } finally {
-    state.busy = false;
+    refusal = problem.message;
   }
-  drawSheet();
-  drawKeys();
+  state.busy = false;
+  if (state.id === id) {
+    if (data !== null) {
+      state.proposal = data.proposal;
+      state.history = data.history;
+      state.mode = "idle";
+      said.textContent = done(data.proposal);
+    } else {
+      state.refused = refusal;
+      state.mode = "idle";
+      said.textContent = `Refused: ${refusal}`;
+    }
+    drawSheet();
+    drawKeys();
+  }
   await loadList().catch(() => {});
 }
 
@@ -749,17 +927,21 @@ async function open(id) {
   state.id = id;
   state.proposal = null;
   state.rows = [];
+  state.readHash = null;
   state.mode = "idle";
   state.refused = null;
-  state.changedSince = false;
+  state.loading = false;
   state.unchanged = new Set();
   history.replaceState(null, "", `#${id}`);
   drawQueue();
+  // The proposal that was open leaves the page at once. Its rows and its buttons must not
+  // stay on screen, under another proposal's name in the list, while the next one is read.
+  sheet.replaceChildren(el("p", { class: "none" }, "Reading the proposal…"));
+  keys.hidden = true;
+  keys.replaceChildren();
   try {
-    const [head, page] = await Promise.all([
-      api(`proposals/${id}`),
-      api(`proposals/${id}/rows?from=1`),
-    ]);
+    const page = await api(`proposals/${id}/rows?from=1`);
+    const head = await api(`proposals/${id}`);
     if (state.id !== id) {
       return;
     }
@@ -767,8 +949,12 @@ async function open(id) {
     state.extent = head.extent;
     state.history = head.history;
     state.rows = page.rows;
-    state.readHash = head.proposal.contentHash;
+    // The rows came with the hash of the content they belong to. If the proposal has another by now, nothing here is approvable.
+    state.readHash = page.contentHash === head.proposal.contentHash ? page.contentHash : null;
   } catch (problem) {
+    if (state.id !== id) {
+      return;
+    }
     state.id = null;
     sheet.replaceChildren(el("p", { class: "none" }, problem.message));
     keys.hidden = true;
@@ -780,10 +966,28 @@ async function open(id) {
   sheet.focus({ preventScroll: true });
 }
 
-async function more() {
+async function more(count) {
+  const id = state.id;
   const from = (state.rows.at(-1)?.seq ?? 0) + 1;
-  const page = await api(`proposals/${state.id}/rows?from=${from}`);
-  state.rows.push(...page.rows);
+  state.loading = true;
+  let page = null;
+  try {
+    page = await api(`proposals/${id}/rows?from=${from}&count=${count}`);
+  } catch (problem) {
+    said.textContent = problem.message;
+  }
+  // Rows asked for one proposal are never added to another that was opened meanwhile.
+  if (state.id !== id) {
+    return;
+  }
+  state.loading = false;
+  if (page !== null) {
+    if (page.contentHash !== state.readHash) {
+      state.readHash = null;
+    } else {
+      state.rows.push(...page.rows);
+    }
+  }
   const top = sheet.scrollTop;
   drawSheet();
   sheet.scrollTop = top;
@@ -803,21 +1007,20 @@ async function refresh() {
   }
   const before = state.proposal;
   const moved = head.proposal.status !== before.status || head.proposal.expired !== before.expired;
-  if (head.proposal.contentHash !== state.readHash && head.proposal.status === "pending") {
-    const page = await api(`proposals/${id}/rows?from=1`);
-    state.rows = page.rows;
-    state.readHash = head.proposal.contentHash;
-    state.changedSince = true;
-    state.mode = "idle";
-  } else if (!moved) {
+  const changed =
+    state.readHash !== null &&
+    head.proposal.status === "pending" &&
+    head.proposal.contentHash !== state.readHash;
+  if (!moved && !changed) {
     return;
+  }
+  if (changed) {
+    state.readHash = null;
   }
   state.proposal = head.proposal;
   state.extent = head.extent;
   state.history = head.history;
-  if (moved) {
-    state.mode = "idle";
-  }
+  state.mode = "idle";
   const top = sheet.scrollTop;
   drawSheet();
   sheet.scrollTop = top;
@@ -849,12 +1052,13 @@ async function start() {
     );
   document.title = `keyturn review: ${state.me.database}`;
   for (const view of ["waiting", "decided"]) {
-    document.getElementById(`view-${view}`).addEventListener("click", async () => {
+    document.getElementById(`view-${view}`).addEventListener("click", () => {
       state.view = view;
-      await loadList();
+      drawQueue();
+      loadList().catch(() => {});
     });
   }
-  await loadList();
+  await loadList().catch(() => {});
   const asked = location.hash.slice(1);
   if (uuid.test(asked)) {
     await open(asked);
@@ -863,11 +1067,21 @@ async function start() {
   } else {
     drawSheet();
   }
-  setInterval(() => {
-    if (!document.hidden) {
-      refresh().catch(() => {});
+  // A proposal's address, pasted or followed while the page is open, opens that proposal.
+  window.addEventListener("hashchange", () => {
+    const wanted = location.hash.slice(1);
+    if (uuid.test(wanted) && wanted !== state.id) {
+      open(wanted);
     }
-  }, 4000);
+  });
+  // One look at a time: the next is not started until the last has come back.
+  const again = async () => {
+    if (!document.hidden) {
+      await refresh().catch(() => {});
+    }
+    setTimeout(again, 4000);
+  };
+  setTimeout(again, 4000);
 }
 
 start();

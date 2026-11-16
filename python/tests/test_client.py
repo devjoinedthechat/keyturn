@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,7 @@ def test_propose_review_approve_apply(connections: dict[str, psycopg.Connection[
         ("public.accounts", "update", 1)
     ]
     (row,) = alice.diff(made.id)
-    assert (row.table, row.operation, row.key) == ("public.accounts", "update", {"id": 1})
+    assert (row.table, row.operation, row.key) == ("public.accounts", "update", {"id": "1"})
     changed = [column for column in row.columns if column.changed]
     assert [(c.column, c.before, c.after, c.after_kind) for c in changed] == [
         ("balance", "100.0000", "250.0000", "number")
@@ -107,6 +108,8 @@ def test_propose_review_approve_apply(connections: dict[str, psycopg.Connection[
     assert agent.apply(made.id).status == "applied"
     assert _balance(connections["owner"], 1) == "250.0000"
     assert alice.verify_audit() == []
+    entries, head = alice.audit_head()
+    assert entries >= 3 and len(head) == 64
 
 
 def test_a_reviewer_sees_every_digit(connections: dict[str, psycopg.Connection[Any]]) -> None:
@@ -200,19 +203,76 @@ def test_a_stale_row_writes_nothing(connections: dict[str, psycopg.Connection[An
     assert _balance(connections["owner"], 7) == "100.0000"
 
 
-def test_a_rolled_back_proposal_was_never_made(server: PostgresContainer) -> None:
-    with psycopg.connect(
+def _plain_connection(server: PostgresContainer, user: str) -> psycopg.Connection[Any]:
+    """A connection as psycopg makes it by default: not in autocommit mode."""
+    return psycopg.connect(
         host=server.get_container_host_ip(),
         port=int(server.get_exposed_port(5432)),
         dbname=server.dbname,
-        user="agent_bot",
+        user=user,
         password="test-only",  # noqa: S106 - a login that exists only in this test's container
-    ) as connection:
-        made = Keyturn(connection).propose(
-            [{"table": "accounts", "operation": "delete", "key": {"id": 8}}]
+    )
+
+
+def test_what_it_says_is_applied_is_written_on_any_connection(
+    server: PostgresContainer, connections: dict[str, psycopg.Connection[Any]]
+) -> None:
+    with _plain_connection(server, "agent_bot") as agent_link:
+        agent = Keyturn(agent_link)
+        alice = Keyturn(connections["alice"])
+        made = agent.propose(
+            [{"table": "accounts", "operation": "update", "key": {"id": 8}, "set": {"balance": 5}}]
         )
-        connection.rollback()
-        assert Keyturn(connection).proposal(made.id) is None
+        # Seen from another connection at once: the proposal was committed when the call returned.
+        assert alice.proposal(made.id) is not None
+        alice.approve(made.id, made.content_hash)
+        assert agent.apply(made.id).status == "applied"
+        assert _balance(connections["owner"], 8) == "5.0000"
+
+        # A refusal leaves the connection fit for the next call.
+        with pytest.raises(Refused):
+            agent.approve(made.id, made.content_hash)
+        assert agent.proposal(made.id) is not None
+        assert agent.decision(made.id).status == "applied"
+
+
+def test_a_call_inside_the_callers_transaction_is_kept_or_lost_with_it(
+    server: PostgresContainer,
+) -> None:
+    with _plain_connection(server, "agent_bot") as agent_link:
+        agent = Keyturn(agent_link)
+        with pytest.raises(RuntimeError), agent_link.transaction():
+            made = agent.propose([{"table": "accounts", "operation": "delete", "key": {"id": 9}}])
+            raise RuntimeError("the caller changes its mind")
+        assert agent.proposal(made.id) is None
+
+        with agent_link.transaction():
+            kept = agent.propose([{"table": "accounts", "operation": "delete", "key": {"id": 9}}])
+        assert agent.proposal(kept.id) is not None
+
+
+def test_values_with_no_faithful_form_are_refused_not_guessed(
+    connections: dict[str, psycopg.Connection[Any]],
+) -> None:
+    agent = Keyturn(connections["agent"])
+    with pytest.raises(TypeError, match="no faithful form"):
+        agent.propose(
+            [{"table": "accounts", "operation": "update", "key": {"id": 10}, "set": {"memo": b"x"}}]
+        )
+    made = agent.propose(
+        [
+            {
+                "table": "accounts",
+                "operation": "update",
+                "key": {"id": 10},
+                "set": {"balance": Decimal("12345678901234567890.1234")},
+            }
+        ]
+    )
+    columns = {column.column: column for column in agent.diff(made.id)[0].columns}
+    assert columns["balance"].after == "12345678901234567890.1234"
+    assert [step.event for step in agent.history(made.id)] == ["opened"]
+    assert made.id in [proposal.id for proposal in agent.recent(5)]
 
 
 def test_doctor(connections: dict[str, psycopg.Connection[Any]]) -> None:

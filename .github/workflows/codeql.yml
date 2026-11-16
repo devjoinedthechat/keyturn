@@ -1,6 +1,6 @@
 name: CodeQL
 
-# Static analysis of the TypeScript and of the workflows themselves, on every
+# Static analysis of the TypeScript, the Python and the workflows themselves, on every
 # change and once a week, so that a newly published query also reaches code
 # that has not changed.
 on:
@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [javascript-typescript, actions]
+        language: [javascript-typescript, python, actions]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3

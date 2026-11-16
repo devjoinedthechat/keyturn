@@ -171,6 +171,52 @@ describe("tampering with Keyturn's own records", () => {
     );
   });
 
+  // PostgreSQL looks in a session's temporary schema before any other for tables and types,
+  // unless a function's search path names that schema itself. A function that runs with its
+  // owner's rights and reads "pg_attribute" would read the agent's table of that name, and
+  // run whatever the agent put behind it, as the owner.
+  test("a temporary table or type of the agent's, named like one of the server's, is not what Keyturn reads", async () => {
+    const before = await balances();
+    await agent.query(`
+      create function pg_temp.mine() returns boolean language plpgsql as $$
+      begin
+        update public.accounts set balance = 999999 where id = 5;
+        insert into keyturn.rules (name, relation, operations) values ('planted', 'public.accounts', array['delete']);
+        return true;
+      end $$;
+      create temp view pg_attribute as
+        select attrelid, attname, atttypid, atttypmod, attgenerated, attidentity, attnum, attisdropped
+          from pg_catalog.pg_attribute where pg_temp.mine();
+      create temp view pg_index as select * from pg_catalog.pg_index where pg_temp.mine();
+      create temp view pg_roles as select * from pg_catalog.pg_roles where pg_temp.mine();
+      create temp view pg_auth_members as select * from pg_catalog.pg_auth_members where pg_temp.mine();
+      grant select on pg_attribute, pg_index, pg_roles, pg_auth_members to public;
+      grant execute on function pg_temp.mine() to public;
+      create type pg_temp.oid as (n integer);
+      create type pg_temp.regclass as (n integer);
+      create type pg_temp.text as (n integer);
+    `);
+    try {
+      // Every way the agent has of making Keyturn's functions run.
+      const proposed = await propose(agent, [raise(5, 150)]);
+      await refusal(apply(agent, proposed.proposal_id));
+      await refusal(agent.query("update proposal.accounts set balance = 151 where id = 6"));
+      await refusal(agent.query("select * from keyturn.diff($1)", [proposed.proposal_id]));
+      await refusal(agent.query("select * from keyturn.proposed()"));
+      await alice.query("select keyturn.approve($1, $2)", [
+        proposed.proposal_id,
+        proposed.content_hash,
+      ]);
+      await alice.query("select keyturn.reject($1)", [
+        (await propose(agent, [raise(7, 150)])).proposal_id,
+      ]);
+    } finally {
+      await agent.query("discard temp");
+    }
+    expect(await balances()).toEqual(before);
+    expect((await owner.query("select from keyturn.rules")).rowCount).toBe(0);
+  });
+
   test("the agent cannot replace or shadow a function Keyturn uses", async () => {
     // A function of the agent's own with the name of one Keyturn calls, placed first on the agent's search path.
     await agent.query(

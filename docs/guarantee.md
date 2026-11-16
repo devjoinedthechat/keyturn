@@ -31,7 +31,9 @@ A tables' owner may write a rule for changes too small to wait for someone. None
 
 A proposal goes through on rules only when every change in it is covered. The record then names the rules and their versions, and says no person decided. The stale-row check applies as it does to any proposal.
 
-An agent cannot write, change or read the rules. `keyturn.doctor()` lists every active one.
+An agent cannot write or change a rule, or read what one says. It does learn the name of a rule that let its own proposal through. `keyturn.doctor()` lists every active one.
+
+A rule decides only in a read committed transaction, PostgreSQL's default. In one that keeps a single view of the data, it could not count what it has already let through, so it refuses.
 
 ## The record
 
@@ -57,6 +59,7 @@ Every step of a proposal is an entry in `keyturn.audit`: opened, approved, appro
 - **An agent given the owner's credentials.** Then it is not connected through Keyturn.
 - **An approver who approves without reading.** Keyturn puts the rows in front of a person. It cannot make them look.
 - **Effects outside the database.** Emails, payments, calls to other services.
+- **Row-level security as a limit on what may be proposed.** Policies decide which rows an agent can see and name. They do not check the row an agent proposes to insert, or what it proposes a row should become: the approver does. A rule on such a table needs a condition that does the same.
 - **What a table's cascades do to other tables.** The approved rows are checked after the write. Rows a cascade changes elsewhere are that table's own design.
 
 ## How it differs from what exists

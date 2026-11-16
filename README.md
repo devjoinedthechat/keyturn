@@ -6,7 +6,10 @@ An agent connected through Keyturn cannot change a protected table. It can only 
 
 The check is not in the agent, a framework hook or a proxy. It is in the database's own privileges, so it holds whatever code reaches the database.
 
-![The review page showing a proposal of 8,114 deletes waiting for approval](docs/images/review-light.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
+  <img alt="The review page showing a proposal of 8,114 deletes waiting for approval" src="docs/images/review-light.png">
+</picture>
 
 ## What it looks like
 
@@ -24,19 +27,25 @@ postgres│ DELETE 0
 Nothing was deleted. The person who approves sees the size of it before anything else.
 
 ```text
-$ keyturn show 0f65fb6a
+$ keyturn show 0f65fb6a --rows 1
 proposal  0f65fb6a-6f20-4799-afc1-7328d0f2ae78  pending, expires in 24 hours
 by        support_agent, a moment ago
 note      Cleaning up old test orders, as asked.
+hash      5a04fb4d66f7eaf7dc21ea960870b6d345d97e163dfaab0ea87cb0d46402448f
 
   public.orders  8,114 deletes
 
 #1 delete public.orders  id = 1
+   - id        1
    - customer  "customer 7919"
    - total     46.00
-   …
+   - status    "paid"
+   - placed    "2024-01-01"
+
+Rows 1 to 1 of 8,114 are shown. --from 2 shows the next, --rows sets how many.
 
 $ keyturn reject 0f65fb6a --reason "These are real orders. Test orders have a customer starting with 'test'."
+Rejected 0f65fb6a-6f20-4799-afc1-7328d0f2ae78.
 ```
 
 The agent reads the reason, proposes the twelve rows that were meant, and those are approved and written. Run the whole exchange yourself with `pnpm demo`, or `pnpm demo --review` to decide it on the review page.
@@ -67,7 +76,7 @@ sequenceDiagram
 | Audit    | One entry per step, hash-chained, never updated or deleted                                                              |
 | Doctor   | Inspects a live database and fails if an agent has any way round                                                        |
 
-Keyturn is SQL and PL/pgSQL installed by migration. It needs no extension, so it runs on managed PostgreSQL.
+Keyturn is SQL and PL/pgSQL installed by migration. It needs no extension and no superuser, which is what managed PostgreSQL allows; the whole test suite installs it as an ordinary owner.
 
 ## Quick start
 
@@ -160,7 +169,9 @@ keyturn reject 0f65fb6a --reason "..."
 keyturn review               # the same on a page, on this machine only
 ```
 
-The review page puts the size of the change first, shows hidden and direction-reversing characters as their codes, and sends the hash of what was on screen with the approval. It adds no power: it calls the same database functions as the approver's login.
+The review page puts the size of the change first and sends the hash of what was on screen with the approval. It adds no power: it calls the same database functions as the approver's login.
+
+What an agent wrote is shown exactly. Hidden and direction-reversing characters appear as their codes, trailing spaces and line breaks are marked, and numbers keep every digit. Rows that were never put on screen are approved only by typing their number.
 
 Its server listens on 127.0.0.1, needs a key made for each run, refuses requests from other sites, and loads nothing but its own three files.
 
@@ -170,8 +181,8 @@ By default every change waits for someone. The tables' owner may write a rule fo
 
 ```sql
 select keyturn.allow('close_tickets', 'tickets', array['update'], array['status', 'note'],
-                     p_max_rows => 1, p_condition => $$after ->> 'status' = 'closed'$$,
-                     p_per_hour => 60);
+                     max_rows => 1, condition => $$after ->> 'status' = 'closed'$$,
+                     per_hour => 60);
 ```
 
 A proposal goes through on rules only when every change in it is covered. The audit log then names the rule and its version, and records that no person decided. `keyturn doctor` lists every active rule.
@@ -197,7 +208,7 @@ It reports an entry that was altered, one that is missing, and a proposal whose 
 | An approver approving their own proposal     | An approver who approves without reading |
 | Two connections applying at once             | Effects outside the database             |
 
-The claim is tested by attack. The suite connects as the agent and tries every way in: direct writes, `TRUNCATE`, `COPY`, `MERGE`, role switching, forged approvals, proposals altered after approval, double apply, apply against changed rows, writing the audit log, writing the rules. Each must fail. It runs on PostgreSQL 15, 16, 17 and 18.
+The claim is tested by attack. The suite connects as the agent and tries every way in. Against the tables: direct writes, `TRUNCATE`, `COPY`, `MERGE`, role switching, and temporary tables and types named like the server's own. Against the process: forged approvals, proposals altered after approval, double apply, apply against changed rows, and writing the audit log or the rules. Each must fail. It runs on PostgreSQL 15, 16, 17 and 18.
 
 ## Cost
 
@@ -215,6 +226,8 @@ The time that matters is the person's. Keyturn is for changes worth a person's l
 ## Things to know
 
 - **A proposal holds at most 10,000 rows.** A wider statement is refused whole. Make the change in parts.
+- **A login may have 200 proposals waiting.** More are refused until some are decided or expire, so the party under review cannot bury the queue.
+- **Version 0.1 installs into a database that does not have Keyturn.** Moving to a later version means `keyturn uninstall` and `keyturn install`, which removes proposals and the audit log.
 - **The agent does not see its proposed change when it reads again.** Nothing is written until apply.
 - **A view holds on to its table's columns.** Before dropping or retyping a column, run `select keyturn.drop_view('orders')`, then `select keyturn.protect('orders')` after.
 - **The table's triggers, defaults and cascades run at apply.** A row that comes out different from what was approved fails the apply, unless the table was protected with `--loose`.

@@ -1,4 +1,4 @@
-export { install, installed, protect, rolesSql, uninstall, unprotect } from "./install.ts";
+export { install, installed, protect, rolesSql, uninstall, unprotect, version } from "./install.ts";
 export {
   type Change,
   type ColumnDiff,
@@ -11,9 +11,10 @@ export {
   type Queryable,
   Refused,
   type RowDiff,
+  refusalOf,
   type Status,
   type Step,
   Undecided,
 } from "./keyturn.ts";
-export { serveReview } from "./review.ts";
+export { type Review, serveReview } from "./review.ts";
 export { serveTools } from "./tools.ts";

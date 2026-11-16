@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import pg from "pg";
 import { install, installed, protect, uninstall, unprotect, version } from "./install.ts";
 import { Keyturn, type Queryable, Refused } from "./keyturn.ts";
-import { renderFindings, renderList, renderProposal, type Style } from "./render.ts";
+import { json, plain, renderFindings, renderList, renderProposal, type Style } from "./render.ts";
 import { serveReview } from "./review.ts";
 import { serveTools, unfitForAgent } from "./tools.ts";
 
@@ -32,7 +32,8 @@ For an agent
 A proposal is named by its id or the start of it.
 
 The database
-  --url <url>                     Or KEYTURN_URL, or DATABASE_URL, or the PG* variables.
+  --url <url>                     Or KEYTURN_URL, or DATABASE_URL, or the PG* variables. Prefer a variable:
+                                  other users of the machine can read a command line.
                                   The login decides what is allowed: connect as the owner to install,
                                   as an approver to approve.
 
@@ -57,8 +58,32 @@ export interface Io {
   /** Resolves when `keyturn review` should close. Absent: when the process is interrupted. */
   until?: () => Promise<void>;
   /** For tests: a connection to use in place of one made from the url. */
-  connect?: (url: string | undefined) => Promise<Queryable & { end(): Promise<void> }>;
+  connect?: (url: string | undefined) => Promise<Link>;
 }
+
+/** A database connection as a command uses it. */
+export interface Link extends Queryable {
+  end(): Promise<void>;
+  /** Rejects when the connection is lost. Absent when the connection cannot say. */
+  lost?: Promise<never>;
+}
+
+/** What each command is given after its name. */
+const commands: Record<string, string | null> = {
+  install: null,
+  uninstall: null,
+  protect: "a table",
+  unprotect: "a table",
+  doctor: null,
+  list: null,
+  show: "a proposal",
+  approve: "a proposal",
+  reject: "a proposal",
+  apply: "a proposal",
+  review: null,
+  tools: null,
+  "verify-audit": null,
+};
 
 class Usage extends Error {}
 
@@ -82,12 +107,29 @@ export async function run(argv: string[], io: Io): Promise<number> {
     return 0;
   }
 
+  // What can be told to be wrong without the database is told first.
+  if (!(command in commands)) {
+    io.err(
+      `There is no command "${plain(command.slice(0, 40))}".\n\nkeyturn help lists the commands.`,
+    );
+    return 2;
+  }
+  const wanted = commands[command];
+  if (wanted !== null && wanted !== undefined && target === undefined) {
+    io.err(`keyturn ${command} needs ${wanted}.\n\nkeyturn help lists the commands.`);
+    return 2;
+  }
+
   const url = values.url ?? io.env.KEYTURN_URL ?? io.env.DATABASE_URL;
-  let db: Queryable & { end(): Promise<void> };
+  let db: Link;
   try {
     db = await (io.connect ?? connect)(url);
   } catch (error) {
-    io.err(`Could not connect to the database: ${(error as Error).message}`);
+    const reason =
+      (error as Error).message ||
+      (error as { code?: string }).code ||
+      "the address was not understood";
+    io.err(`Could not connect to the database: ${plain(reason)}`);
     return 1;
   }
 
@@ -97,8 +139,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
     full: values.full ?? false,
     unchanged: values.unchanged ?? false,
   };
-  const print = (data: unknown, text: string) =>
-    io.out(values.json ? JSON.stringify(data, null, 2) : text);
+  const print = (data: unknown, text: string) => io.out(values.json ? json(data) : text);
   const need = (what: string): string => {
     if (target === undefined) {
       throw new Usage(`keyturn ${command} needs ${what}.`);
@@ -120,7 +161,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
     const page = { from: number("from", 1), count: number("rows", 50) };
     const proposal = await keyturn.proposal(id);
     if (proposal === null) {
-      throw new Refused(`there is no proposal ${id} that this login can see`, "02000", null);
+      throw new Refused(`there is no proposal ${id} that this login can see`, null);
     }
     const extent = await keyturn.extent(id);
     const rows = await keyturn.diff(id, page);
@@ -129,11 +170,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
 
   try {
     if (command !== "install" && (await installed(db)) === null) {
-      throw new Refused(
-        "keyturn is not installed in this database. Run: keyturn install",
-        "3F000",
-        null,
-      );
+      throw new Refused("keyturn is not installed in this database. Run: keyturn install", null);
     }
     switch (command) {
       case "install": {
@@ -194,10 +231,21 @@ export async function run(argv: string[], io: Io): Promise<number> {
           io.out(renderProposal(all.proposal, all.extent, all.rows, style));
           io.out("");
           const total = all.proposal.changes;
+          const onScreen = all.rows.length;
+          // Rows that were not on the screen are approved by their number, typed out: a
+          // habit of typing "approve" must not be enough for rows nobody looked at.
+          const word = onScreen < total ? String(total) : "approve";
           const answer = await io.ask(
-            `Approve ${total === 1 ? "this change" : `all ${total.toLocaleString("en")} of these changes`}? Type "approve", or anything else to leave it: `,
+            onScreen < total
+              ? `${onScreen.toLocaleString("en")} of ${total.toLocaleString("en")} changes were shown (--from and --rows show the rest). To approve all ${total.toLocaleString("en")}, type that number; anything else leaves it: `
+              : `Approve ${total === 1 ? "this change" : `these ${total.toLocaleString("en")} changes`}? Type "approve", or anything else to leave it: `,
           );
-          if (answer.trim().toLowerCase() !== "approve") {
+          if (
+            answer
+              .trim()
+              .toLowerCase()
+              .replace(/[,.\s]/g, "") !== word
+          ) {
             io.out("Left as it was.");
             return 1;
           }
@@ -230,12 +278,27 @@ export async function run(argv: string[], io: Io): Promise<number> {
         if (port !== undefined && !(Number.isInteger(port) && port >= 0 && port < 65536)) {
           throw new Usage("--port takes a port number.");
         }
-        const page = await serveReview(db, port === undefined ? {} : { port });
+        const page = await serveReview(db, {
+          ...(port === undefined ? {} : { port }),
+          fault: (error) =>
+            io.err(`review: ${plain(error instanceof Error ? error.message : String(error))}`),
+        });
         io.out(
           `The review page is open to this machine only, as the login you connected with:\n\n  ${page.url}\n\nThe address carries a key made for this run. Ctrl-C closes the page.`,
         );
-        await (io.until ?? interrupted)();
-        await page.close();
+        try {
+          await Promise.race([
+            (io.until ?? interrupted)(),
+            db.lost ?? new Promise<never>(() => {}),
+          ]);
+        } catch {
+          io.err(
+            "The connection to the database was lost. The review page has closed; start it again.",
+          );
+          return 1;
+        } finally {
+          await page.close();
+        }
         return 0;
       }
       case "tools": {
@@ -243,7 +306,21 @@ export async function run(argv: string[], io: Io): Promise<number> {
         if (unfit !== null) {
           throw new Refused(unfit, "42501", null);
         }
-        await serveTools(db, io.input ?? process.stdin, io.output ?? process.stdout);
+        const input = io.input ?? process.stdin;
+        try {
+          await Promise.race([
+            serveTools(db, input, io.output ?? process.stdout, {
+              fault: (error) =>
+                io.err(`tools: ${plain(error instanceof Error ? error.message : String(error))}`),
+            }),
+            db.lost ?? new Promise<never>(() => {}),
+          ]);
+        } catch {
+          // Whatever started this will see it end, and can start it again with a connection that works.
+          io.err("tools: the connection to the database was lost.");
+          input.destroy();
+          return 1;
+        }
         return 0;
       }
       case "verify-audit": {
@@ -252,12 +329,12 @@ export async function run(argv: string[], io: Io): Promise<number> {
           { problems, ...head },
           problems.length === 0
             ? `The audit log holds together: ${head.entries.toLocaleString("en")} entries.\nhead ${head.head}\nKeep the head somewhere this database's owner cannot reach.`
-            : `${problems.map((problem) => `${problem.proposalId}  ${problem.problem}`).join("\n")}\n\nThe audit log does not hold together.`,
+            : `${problems.map((problem) => `${problem.proposalId}  ${plain(problem.problem)}`).join("\n")}\n\nThe audit log does not hold together.`,
         );
         return problems.length === 0 ? 0 : 1;
       }
       default:
-        throw new Usage(`There is no command "${command}".`);
+        throw new Usage(`There is no command "${plain(command)}".`);
     }
   } catch (error) {
     if (error instanceof Usage) {
@@ -265,10 +342,10 @@ export async function run(argv: string[], io: Io): Promise<number> {
       return 2;
     }
     if (error instanceof Refused) {
-      io.err(`Refused: ${error.message}`);
+      io.err(`Refused: ${plain(error.message)}`);
       return 1;
     }
-    io.err(`Failed: ${(error as Error).message}`);
+    io.err(`Failed: ${plain((error as Error).message)}`);
     return 1;
   } finally {
     await db.end().catch(() => {});
@@ -286,7 +363,8 @@ function told(outcome: { status: string; reason?: string; changes?: number }): s
   if (outcome.status === "applied") {
     return `Applied: ${outcome.changes ?? 0} row${outcome.changes === 1 ? "" : "s"} written.`;
   }
-  return `Nothing was written. The proposal is ${outcome.status}${outcome.reason === undefined ? "" : `: ${outcome.reason}`}`;
+  // The reason can carry what a table's own trigger said, with an agent's value in it.
+  return `Nothing was written. The proposal is ${outcome.status}${outcome.reason === undefined ? "" : `: ${plain(outcome.reason)}`}`;
 }
 
 function parse(argv: string[]) {
@@ -326,7 +404,7 @@ async function named(db: Queryable, given: string): Promise<string> {
     [start],
   );
   if (rows.length === 0) {
-    throw new Refused(`there is no proposal ${given} that this login can see`, "02000", null);
+    throw new Refused(`there is no proposal ${given} that this login can see`, null);
   }
   if (rows.length > 1) {
     throw new Usage(`More than one proposal starts with ${given}. Give more of the id.`);
@@ -334,10 +412,28 @@ async function named(db: Queryable, given: string): Promise<string> {
   return (rows[0] as { id: string }).id;
 }
 
-async function connect(url: string | undefined) {
+async function connect(url: string | undefined): Promise<Link> {
   const client = new pg.Client(url === undefined ? {} : { connectionString: url });
-  // A connection the server closes while idle must not take the process down with an unhandled error.
-  client.on("error", () => {});
+  let fail: (error: Error) => void = () => {};
+  const lost = new Promise<never>((_, reject) => {
+    fail = reject;
+  });
+  // Nothing may be waiting on it; that must not count as an error nobody handled.
+  lost.catch(() => {});
+  client.on("error", (error) => fail(error));
+  client.on("end", () => fail(new Error("the connection closed")));
   await client.connect();
-  return client;
+
+  // One query at a time, in the order asked. The page and the tool server both ask for
+  // several things at once over this one connection.
+  let last: Promise<unknown> = Promise.resolve();
+  return {
+    query(text, values) {
+      const next = last.then(() => client.query(text, values));
+      last = next.catch(() => {});
+      return next;
+    },
+    end: () => client.end(),
+    lost,
+  };
 }

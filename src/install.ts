@@ -29,9 +29,10 @@ export async function installed(db: Queryable): Promise<string | null> {
  * one nobody else is using, since a transaction is opened on it.
  */
 export async function install(db: Queryable): Promise<{ version: string }> {
+  single(db);
   const present = await installed(db);
   if (present !== null) {
-    throw new Refused(`keyturn ${present} is already installed in this database`, "42P06", null);
+    throw new Refused(`keyturn ${present} is already installed in this database`, "42P06");
   }
   const { rows } = await db.query(
     `select (select rolcreaterole or rolsuper from pg_roles where rolname = current_user) as may_create,
@@ -64,7 +65,8 @@ export async function install(db: Queryable): Promise<{ version: string }> {
     );
     await db.query("commit");
   } catch (error) {
-    await db.query("rollback");
+    // If the rollback fails too, the first failure is still the one to report.
+    await db.query("rollback").catch(() => {});
     throw refusalOf(error) ?? error;
   }
   return { version: release };
@@ -76,13 +78,15 @@ export async function install(db: Queryable): Promise<{ version: string }> {
  * three roles stay, since other databases on the server may use them.
  */
 export async function uninstall(db: Queryable): Promise<void> {
+  single(db);
   await db.query("begin");
   try {
     await db.query("drop schema if exists proposal cascade");
     await db.query("drop schema if exists keyturn cascade");
     await db.query("commit");
   } catch (error) {
-    await db.query("rollback");
+    // If the rollback fails too, the first failure is still the one to report.
+    await db.query("rollback").catch(() => {});
     throw refusalOf(error) ?? error;
   }
 }
@@ -109,5 +113,15 @@ export async function unprotect(db: Queryable, table: string): Promise<void> {
     await db.query("select keyturn.unprotect($1::regclass)", [table]);
   } catch (error) {
     throw refusalOf(error) ?? error;
+  }
+}
+
+/** Installing opens a transaction, which a pool would spread over several connections. */
+function single(db: Queryable): void {
+  if ("totalCount" in db || "idleCount" in db) {
+    throw new Refused(
+      "this takes one connection, not a pool: take a client from the pool and pass that",
+      null,
+    );
   }
 }

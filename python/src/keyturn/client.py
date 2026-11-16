@@ -11,8 +11,11 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from datetime import time as time_of_day
+from decimal import Decimal
 from typing import Any, Literal
+from uuid import UUID
 
 import psycopg
 from psycopg.rows import dict_row
@@ -76,7 +79,9 @@ class RowDiff:
     seq: int
     table: str
     operation: Literal["insert", "update", "delete"]
-    key: dict[str, Any]
+    #: The row's primary key, each part as PostgreSQL writes it: text, so that a large
+    #: number keeps every digit.
+    key: dict[str, str | None]
     columns: list[ColumnDiff]
 
 
@@ -85,6 +90,15 @@ class Extent:
     table: str
     operation: Literal["insert", "update", "delete"]
     rows: int
+
+
+@dataclass(frozen=True)
+class Step:
+    event: str
+    #: The login that did it.
+    actor: str
+    at: datetime
+    detail: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -106,6 +120,13 @@ _PROPOSAL = """
 """
 
 
+def _as_json(value: object) -> str:
+    """Values JSON has no form for, that have one faithful text form PostgreSQL reads."""
+    if isinstance(value, (Decimal, datetime, date, time_of_day, UUID)):
+        return str(value)
+    raise TypeError(f"{type(value).__name__} has no faithful form in a proposal; pass it as text")
+
+
 def _outcome(value: Mapping[str, Any] | None) -> Outcome | None:
     if value is None:
         return None
@@ -119,8 +140,12 @@ def _proposal(row: Mapping[str, Any]) -> Proposal:
 class Keyturn:
     """Keyturn, over one psycopg connection.
 
-    The connection should be in autocommit mode, or the caller commits: a proposal made in
-    a transaction that is rolled back was never made.
+    Each call is a transaction of its own and is committed when it returns, whether or not
+    the connection is in autocommit mode: an apply that says "applied" has been written.
+
+    The one exception is a caller that has opened a transaction itself, with
+    ``connection.transaction()`` or by running a statement first on a connection that is not
+    in autocommit mode. The call then joins that transaction, and is kept or lost with it.
     """
 
     def __init__(self, connection: psycopg.Connection[Any]) -> None:
@@ -141,7 +166,7 @@ class Keyturn:
         """
         rows = self._run(
             "select proposal_id::text as id from keyturn.propose(%s::jsonb, %s, %s::interval)",
-            (json.dumps(list(changes), default=str), note, valid_for),
+            (json.dumps(list(changes), default=_as_json), note, valid_for),
         )
         made = self.proposal(rows[0]["id"])
         if made is None:  # pragma: no cover - the proposer can always read its own proposal
@@ -173,9 +198,11 @@ class Keyturn:
     def diff(self, proposal_id: str, *, start: int = 1, count: int = 100) -> list[RowDiff]:
         """The rows a proposal would change, before and after, ``count`` rows from ``start``."""
         rows = self._run(
-            """select seq, relation, operation, key, column_name, before, after,
-                      before_kind, after_kind, changed
-                 from keyturn.diff(%s, %s, %s)""",
+            """select seq, relation, operation,
+                      (select jsonb_object_agg(part.key, part.value #>> '{}')
+                         from jsonb_each(d.key) as part) as key,
+                      column_name, before, after, before_kind, after_kind, changed
+                 from keyturn.diff(%s, %s, %s) as d""",
             (proposal_id, start, count),
         )
         result: list[RowDiff] = []
@@ -239,6 +266,25 @@ class Keyturn:
                 raise Undecided(f"nobody has decided proposal {proposal_id} yet")
             time.sleep(every)
 
+    def recent(self, count: int = 50) -> list[Proposal]:
+        """The latest proposals in any state, newest first."""
+        rows = self._run(_PROPOSAL + " order by p.proposed_at desc, p.id limit %s", (count,))
+        return [_proposal(row) for row in rows]
+
+    def history(self, proposal_id: str) -> list[Step]:
+        """What has happened to a proposal, in order, from the audit log."""
+        rows = self._run(
+            "select event, actor::text as actor, at, detail from keyturn.audit"
+            " where proposal_id = %s order by seq",
+            (proposal_id,),
+        )
+        return [Step(**row) for row in rows]
+
+    def audit_head(self) -> tuple[int, str]:
+        """The number of audit entries and one value for all of them, to keep elsewhere."""
+        rows = self._run("select entries::int as entries, head from keyturn.audit_head()")
+        return rows[0]["entries"], rows[0]["head"]
+
     def doctor(self) -> list[Finding]:
         """Whether the guarantee holds in this database. For the tables' owner."""
         return [
@@ -253,7 +299,12 @@ class Keyturn:
 
     def _run(self, query: str, values: Sequence[Any] = ()) -> list[dict[str, Any]]:
         try:
-            with self._connection.cursor(row_factory=dict_row) as cursor:
+            # A transaction of its own: committed on the way out, and rolled back on a refusal,
+            # so that a refusal does not leave the connection unable to run the next call.
+            with (
+                self._connection.transaction(),
+                self._connection.cursor(row_factory=dict_row) as cursor,
+            ):
                 cursor.execute(query, values)
                 return cursor.fetchall()
         except psycopg.Error as error:

@@ -9,7 +9,7 @@ import {
   Undecided,
   uninstall,
 } from "../src/index.ts";
-import { plain, renderProposal } from "../src/render.ts";
+import { json, plain, renderProposal } from "../src/render.ts";
 import { Database, logins } from "./database.ts";
 
 const schema = `
@@ -73,7 +73,7 @@ describe("the client", () => {
       seq: 1,
       table: "public.accounts",
       operation: "update",
-      key: { id: 1 },
+      key: { id: "1" },
     });
     expect(row?.columns.map((column) => column.column)).toEqual([
       "id",
@@ -145,6 +145,45 @@ describe("the client", () => {
         changed: true,
       },
     ]);
+  });
+
+  test("names a row by a key larger than a program's numbers, digit for digit", async () => {
+    await owner.query(`
+      create table ledger (id bigint primary key, amount numeric not null);
+      insert into ledger values (9007199254740993, 1), (9007199254740992, 2);
+      select keyturn.protect('ledger');
+      grant select on ledger to keyturn_agent, keyturn_approver;
+    `);
+    const made = await agent.propose([
+      { table: "ledger", operation: "update", key: { id: "9007199254740993" }, set: { amount: 5 } },
+    ]);
+    const [row] = await alice.diff(made.id);
+    expect(row?.key).toEqual({ id: "9007199254740993" });
+    const proposal = await alice.proposal(made.id);
+    const text = renderProposal(
+      proposal as NonNullable<typeof proposal>,
+      await alice.extent(made.id),
+      [row as NonNullable<typeof row>],
+      {
+        color: false,
+        full: false,
+        unchanged: false,
+      },
+    );
+    expect(text).toContain("id = 9007199254740993");
+  });
+
+  test("is refused a pool for installing, which needs one connection", async () => {
+    const { default: postgres } = await import("pg");
+    const pool = new postgres.Pool({ connectionString: database.url(logins.owner), max: 2 });
+    try {
+      await expect(install(pool)).rejects.toThrow("one connection, not a pool");
+      await expect(uninstall(pool)).rejects.toThrow("one connection, not a pool");
+      // The client itself is at home on a pool.
+      expect(await new Keyturn(pool).waiting()).toBeInstanceOf(Array);
+    } finally {
+      await pool.end();
+    }
   });
 
   test("gives a large proposal a page at a time", async () => {
@@ -247,6 +286,53 @@ describe("the client", () => {
     const head = await alice.auditHead();
     expect(head.entries).toBeGreaterThan(0);
     expect(head.head).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("one rule for what does not show", () => {
+  test("is the same on the page and in the terminal, for every character there is", async () => {
+    const page = (await import("../review/hidden.js")) as { hidden(character: string): boolean };
+    const differing: string[] = [];
+    let masked = 0;
+    for (let code = 0; code <= 0x10ffff; code += 1) {
+      // Half a pair is not a character anyone can write on its own.
+      if (code >= 0xd800 && code <= 0xdfff) {
+        continue;
+      }
+      const character = String.fromCodePoint(code);
+      const inTerminal = plain(character) !== character;
+      if (page.hidden(character) !== inTerminal) {
+        differing.push(code.toString(16));
+      }
+      masked += inTerminal ? 1 : 0;
+    }
+    expect(differing).toEqual([]);
+    expect(masked).toBeGreaterThan(1000);
+  });
+
+  test("covers the characters that hide, reverse, join or stand in for nothing", () => {
+    for (const code of [
+      0x00, 0x1b, 0x7f, 0x9b, 0xad, 0x34f, 0x61c, 0x115f, 0x180e, 0x200b, 0x200d, 0x202e, 0x2028,
+      0x2066, 0x3164, 0xfe0f, 0xfeff, 0xffa0, 0xfff9, 0xe0041, 0xe0101,
+    ]) {
+      const character = String.fromCodePoint(code);
+      expect(plain(`a${character}b`), code.toString(16)).toBe(`a\\u{${code.toString(16)}}b`);
+    }
+    expect(plain("Søren's café, 東京 – naïve façade ½ € 😀\tok\nnext")).toBe(
+      "Søren's café, 東京 – naïve façade ½ € 😀\tok\nnext",
+    );
+  });
+
+  test("is kept to in JSON as well, which stays JSON", () => {
+    const value = {
+      note: `a${String.fromCharCode(0x9b)}2J${String.fromCodePoint(0x202e)}b${String.fromCodePoint(0xe0041)}`,
+      n: 1,
+    };
+    const text = json(value);
+    expect(text).not.toMatch(/[\u0080-\u009f\u202e]/);
+    expect(text).toContain("\\u009b");
+    expect(text).toContain("\\udb40\\udc41");
+    expect(JSON.parse(text)).toEqual(value);
   });
 });
 

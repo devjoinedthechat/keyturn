@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       pg:
-        specifier: 8.23.1
+        specifier: ^8.23.1
         version: 8.23.1
     devDependencies:
       '@axe-core/playwright':

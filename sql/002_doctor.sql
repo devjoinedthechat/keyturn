@@ -12,7 +12,7 @@
 create function keyturn.doctor()
   returns table (level text, about text, finding text, fix text)
   language plpgsql
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$
 declare
   member    record;
@@ -46,7 +46,20 @@ begin
       return query select 'fail', member.rolname::text, 'is both an agent and an approver', format('revoke keyturn_approver from %I', member.rolname);
     end if;
 
-    for target in select relation, relation::text as name, (select relowner from pg_class where oid = relation) as owner from keyturn.protected order by 2 loop
+    -- Each protected table, and each table that holds its rows: a partition, or a table that
+    -- inherits from it. A write to one of those is a write to the protected table.
+    for target in
+      with recursive parts (relation, root) as (
+        select relation::oid, relation::oid from keyturn.protected
+        union
+        select i.inhrelid, parts.root from pg_inherits i join parts on parts.relation = i.inhparent
+      )
+      select parts.relation::regclass as relation, c.relowner as owner,
+             case when parts.relation = parts.root then keyturn.name_of(parts.relation)
+                  else format('%s (which holds rows of %s)', keyturn.name_of(parts.relation), keyturn.name_of(parts.root)) end as name
+        from parts join pg_class c on c.oid = parts.relation
+       order by 3
+    loop
       if pg_has_role(member.oid, target.owner, 'MEMBER') then
         return query select 'fail', member.rolname::text, format('owns %s, or is a member of the role that does', target.name),
           format('give %s an owner the agent is not a member of', target.name);
@@ -58,6 +71,15 @@ begin
             format('revoke %s on %s from %I, and from PUBLIC and any role it is a member of', lower(privilege), target.name, member.rolname);
         end if;
       end loop;
+      if has_table_privilege(member.oid, target.relation, 'TRIGGER') then
+        return query select 'fail', member.rolname::text, format('may put a trigger on %s, and a trigger runs with the rights of whoever writes the row: at apply, the owner', target.name),
+          format('revoke trigger on %s from %I, and from PUBLIC and any role it is a member of', target.name, member.rolname);
+      end if;
+      if exists (select from pg_trigger t join pg_proc p on p.oid = t.tgfoid
+                  where t.tgrelid = target.relation and not t.tgisinternal and pg_has_role(member.oid, p.proowner, 'MEMBER')) then
+        return query select 'fail', member.rolname::text, format('owns a function that a trigger on %s runs, and can rewrite it', target.name),
+          format('give the trigger functions on %s an owner the agent is not a member of', target.name);
+      end if;
       if not has_table_privilege(member.oid, target.relation, 'INSERT, UPDATE')
          and has_any_column_privilege(member.oid, target.relation, 'INSERT, UPDATE') then
         return query select 'fail', member.rolname::text, format('may write some columns of %s', target.name),
@@ -66,7 +88,7 @@ begin
       -- A role it could become, which can write. has_table_privilege above sees what is inherited; this sees what SET ROLE would reach.
       for writer in
         select rolname from pg_roles
-         where oid <> member.oid and pg_has_role(member.oid, oid, 'MEMBER') and rolname not like 'pg\_%'
+         where oid <> member.oid and pg_has_role(member.oid, oid, 'MEMBER')
            and has_table_privilege(oid, target.relation, 'INSERT, UPDATE, DELETE, TRUNCATE')
       loop
         return query select 'fail', member.rolname::text, format('is a member of %s, which may write %s', writer.rolname, target.name),
@@ -91,8 +113,13 @@ begin
     end loop;
   end loop;
 
-  for target in select relation, relation::text as name, shape from keyturn.protected order by 2 loop
-    if target.shape <> keyturn.shape_of(target.relation) then
+  for target in select relation, relation::oid as id, keyturn.name_of(relation) as name, shape from keyturn.protected order by 2 loop
+    if target.name is null then
+      return query select 'fail', target.id::text, 'is listed as a protected table and no longer exists',
+        format('delete from keyturn.protected where relation = %s', target.id);
+      continue;
+    end if;
+    if target.shape is distinct from keyturn.shape_of(target.relation) then
       return query select 'fail', target.name, 'has changed shape since it was protected, so no proposal for it can be made or applied',
         format('select keyturn.protect(%L)', target.name);
     end if;
@@ -111,6 +138,13 @@ begin
              array_to_string(target.operations, ', '), coalesce(' (' || array_to_string(target.columns, ', ') || ')', ''), target.max_rows, target.per_hour,
              case when target.conditional then ', under a condition' else '' end),
       format('update keyturn.rules set active = false where name = %L', target.name);
+  end loop;
+
+  for target in select distinct keyturn.name_of(r.relation) as name from keyturn.rules r join pg_class c on c.oid = r.relation
+                 where r.active and c.relrowsecurity and r.operations && array['insert', 'update'] order by 1 loop
+    return query select 'note', target.name,
+      'has row-level security and a rule that lets inserts or updates through. A proposal is written by the owner, so the agent''s own policies do not limit which rows it may propose; with a rule, no person looks either',
+      'give the rule a condition that holds the rows to what the agent may see'::text;
   end loop;
 
   if (select count(*) from pg_trigger where tgrelid = 'keyturn.audit'::regclass and tgname in ('audit_is_append_only', 'audit_is_not_emptied') and tgenabled in ('O', 'A')) < 2 then
@@ -133,7 +167,7 @@ end $$;
 -- True when nothing fails. For a build to stand on.
 create function keyturn.doctor_ok() returns boolean
   language sql
-  set search_path = pg_catalog
+  set search_path = pg_catalog, pg_temp
   as $$ select not exists (select from keyturn.doctor() where level = 'fail') $$;
 
 revoke all on function keyturn.doctor(), keyturn.doctor_ok() from public;

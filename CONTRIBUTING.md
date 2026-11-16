@@ -24,7 +24,8 @@ Tests need Docker. Each run starts one PostgreSQL container; each test file work
 
 - **A change to `sql/` comes with a test that tries to break it.** For anything that touches who may do what, add the attack to `test/attacks.test.ts`.
 - **Functions that run with their owner's rights set `search_path = pg_catalog`** and take identity from `session_user`, never from an argument.
-- **Nothing an agent wrote is printed raw.** Terminal output goes through `plain()`; the page uses `textContent`.
+- **Nothing an agent wrote is printed raw.** Terminal output goes through `plain()`; the page uses `textContent`. The rule for which characters count as hidden is in `src/render.ts` and `review/hidden.js`, and a test holds the two together.
+- **Every function sets `search_path = pg_catalog, pg_temp`.** Naming the temporary schema last is what stops a session's temporary tables and types standing in for the server's.
 - **Run the suite on the oldest supported version too:** `POSTGRES_IMAGE=postgres:15 pnpm test`.
 - **Runtime dependencies stay at one**, the PostgreSQL driver. Anything else needs a reason in the pull request.
 

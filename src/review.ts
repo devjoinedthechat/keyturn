@@ -29,6 +29,7 @@ export interface Review {
 const files: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
+  "/hidden.js": { file: "hidden.js", type: "text/javascript; charset=utf-8" },
   "/style.css": { file: "style.css", type: "text/css; charset=utf-8" },
 };
 
@@ -53,7 +54,28 @@ class Problem extends Error {
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-export async function serveReview(db: Queryable, options: { port?: number } = {}): Promise<Review> {
+/**
+ * The waiting proposals, or the decided ones, for the list at the side: one query however
+ * many there are, at most two hundred of them, and only the start of each note. The list is
+ * written by the party being reviewed, and must not be able to slow the page a reviewer is using.
+ */
+const listed = (decided: boolean) => `
+  select p.id, p.proposed_by::text as "proposedBy", left(p.note, 300) as note, p.status,
+         p.proposed_at as "proposedAt", p.expires_at as "expiresAt",
+         (p.status in ('pending', 'approved') and p.expires_at <= clock_timestamp()) as expired,
+         p.decided_by::text as "decidedBy",
+         (select count(*)::int from keyturn.changes c where c.proposal_id = p.id) as changes,
+         coalesce((select jsonb_agg(jsonb_build_object('table', e.relation, 'operation', e.operation, 'rows', e.row_count))
+                     from keyturn.extent(p.id) as e), '[]'::jsonb) as extent
+    from keyturn.proposals p
+   where ${decided ? "not" : ""} (p.status = 'pending' and p.expires_at > clock_timestamp())
+   order by ${decided ? "coalesce(p.finished_at, p.decided_at, p.expires_at) desc" : "p.proposed_at"}, p.id
+   limit 201`;
+
+export async function serveReview(
+  db: Queryable,
+  options: { port?: number; fault?: (error: unknown) => void } = {},
+): Promise<Review> {
   const keyturn = new Keyturn(db);
   const key = randomBytes(24).toString("base64url");
   const folder = new URL("../review/", import.meta.url);
@@ -62,10 +84,13 @@ export async function serveReview(db: Queryable, options: { port?: number } = {}
     answer(request, response).catch((error: unknown) => {
       const status = error instanceof Problem ? error.status : error instanceof Refused ? 409 : 500;
       // What the database said is for the reviewer. Anything else stays in the terminal.
-      const message =
-        error instanceof Problem || error instanceof Refused
-          ? error.message
-          : "The review page failed.";
+      const known = error instanceof Problem || error instanceof Refused;
+      if (!known) {
+        options.fault?.(error);
+      }
+      const message = known
+        ? (error as Error).message
+        : "The review page could not reach the database.";
       send(response, status, { error: message, refused: error instanceof Refused });
     });
   });
@@ -115,16 +140,8 @@ export async function serveReview(db: Queryable, options: { port?: number } = {}
       return;
     }
     if (request.method === "GET" && parts.length === 1 && parts[0] === "proposals") {
-      const decided = url.searchParams.get("show") === "decided";
-      const proposals = decided ? await keyturn.recent(100) : await keyturn.waiting();
-      const listed = decided
-        ? proposals.filter((proposal) => proposal.status !== "pending" || proposal.expired)
-        : proposals;
-      const withExtent = [];
-      for (const proposal of listed) {
-        withExtent.push({ ...proposal, extent: await keyturn.extent(proposal.id) });
-      }
-      send(response, 200, { proposals: withExtent });
+      const { rows } = await db.query(listed(url.searchParams.get("show") === "decided"));
+      send(response, 200, { proposals: rows.slice(0, 200), more: rows.length > 200 });
       return;
     }
 
@@ -146,7 +163,18 @@ export async function serveReview(db: Queryable, options: { port?: number } = {}
     }
     if (request.method === "GET" && action === "rows") {
       const from = whole(url.searchParams.get("from") ?? "1");
-      send(response, 200, { rows: await keyturn.diff(id, { from, count: 100 }) });
+      const count = url.searchParams.get("count") === "1000" ? 1000 : 100;
+      // The hash is read before the rows. If the content could change between the two, the
+      // rows would be the later ones, and an approval of this hash would be refused: never
+      // the other way round, where rows are approved that were not the ones read.
+      const proposal = await keyturn.proposal(id);
+      if (proposal === null) {
+        throw new Problem(404, "There is no such proposal that this login can see.");
+      }
+      send(response, 200, {
+        contentHash: proposal.contentHash,
+        rows: await keyturn.diff(id, { from, count }),
+      });
       return;
     }
     if (request.method !== "POST") {
