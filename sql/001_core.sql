@@ -31,6 +31,9 @@ create table keyturn.protected (
   relation    regclass    primary key,
   key_columns text[]      not null check (cardinality(key_columns) > 0),
   shape       text        not null,
+  -- Columns the table works out from the others. They are left out of every row image: they
+  -- say nothing the other columns do not, and they change when those do.
+  derived     text[]      not null default '{}',
   -- Whether a row that comes out of an apply different from what was approved (a trigger or
   -- a default changed it) fails the apply. It does, unless the table's owner says otherwise.
   exact       boolean     not null default true,
@@ -102,6 +105,13 @@ create function keyturn.key_condition(p_relation regclass, p_key_columns text[])
       from unnest(p_key_columns) as key_column
   $$;
 
+-- A row of a table, written down: every column but the ones the table works out itself.
+-- "t" is the row in the query this is put into.
+create function keyturn.image(p_derived text[]) returns text
+  language sql immutable
+  set search_path = pg_catalog
+  as $$ select format('(to_jsonb(t) - %L::text[])', p_derived) $$;
+
 -- ---------------------------------------------------------------- protecting a table
 
 -- Puts a table under Keyturn's care. The table must have a primary key: a proposal names
@@ -122,10 +132,13 @@ begin
     raise exception 'keyturn: % has no primary key, so its rows cannot be named', p_relation;
   end if;
 
-  insert into keyturn.protected (relation, key_columns, shape, exact)
-    values (p_relation, key_columns, keyturn.shape_of(p_relation), p_exact)
+  insert into keyturn.protected (relation, key_columns, shape, derived, exact)
+    values (p_relation, key_columns, keyturn.shape_of(p_relation),
+            coalesce((select array_agg(attname::text order by attnum) from pg_attribute
+                       where attrelid = p_relation and attnum > 0 and not attisdropped and attgenerated <> ''), '{}'),
+            p_exact)
     on conflict (relation) do update
-      set key_columns = excluded.key_columns, shape = excluded.shape, exact = excluded.exact;
+      set key_columns = excluded.key_columns, shape = excluded.shape, derived = excluded.derived, exact = excluded.exact;
 end $$;
 
 -- ---------------------------------------------------------------- proposing
@@ -208,6 +221,10 @@ begin
       raise exception 'keyturn: change %: % has no column "%" that can be set', seq, target.relation, unknown;
     end if;
 
+    if not has_table_privilege(session_user, target.relation, 'SELECT') then
+      raise exception 'keyturn: change %: % may not read %', seq, session_user, target.relation using errcode = 'insufficient_privilege';
+    end if;
+
     if operation = 'insert' then
       before := null;
       -- Passed through the table's own types, so that 1 and "1" and 1.0 are written one way.
@@ -225,15 +242,18 @@ begin
         raise exception 'keyturn: change %: a primary key is not changed by an update; delete the row and insert another', seq;
       end if;
 
-      execute format('select to_jsonb(t) from %s t where %s', target.relation, keyturn.key_condition(target.relation, target.key_columns))
+      execute format('select %s from %s t where %s', keyturn.image(target.derived), target.relation, keyturn.key_condition(target.relation, target.key_columns))
         into before using key;
-      if before is null then
-        raise exception 'keyturn: change %: % has no row with key %', seq, target.relation, key;
+      -- A proposal keeps the row it would change, and the proposer can read the proposal. So
+      -- the proposer must already be able to read that row. propose() read it with the caller's
+      -- own rights and handed it over as "seen"; it has to be the row that is really there.
+      if before is null or change -> 'seen' is distinct from before then
+        raise exception 'keyturn: change %: % has no row with key % that % can read', seq, target.relation, key, session_user;
       end if;
       key := (select jsonb_object_agg(entry.key, entry.value) from jsonb_each(before) as entry where entry.key = any (target.key_columns));
 
       if operation = 'update' then
-        execute format('select to_jsonb(r) from jsonb_populate_record(null::%s, $1) r', target.relation) into after using before || given;
+        execute format('select %s from jsonb_populate_record(null::%s, $1) t', keyturn.image(target.derived), target.relation) into after using before || given;
         if after = before then
           raise exception 'keyturn: change %: the row already has these values', seq;
         end if;
@@ -251,24 +271,46 @@ begin
   return query select proposal, digest;
 end $$;
 
--- What a caller uses. It runs with the caller's own rights and settings, for one reason: a
--- table named without its schema is found the way the caller would find it. The recording
--- itself runs with fixed settings and looks nothing up by name.
+-- What a caller uses. It runs with the caller's own rights, for two reasons.
+--
+-- A table named without its schema is found the way the caller would find it. And each row
+-- to be changed is read here, by the caller, so that row-level security and privileges
+-- decide what the caller can see. The recording function, which runs with its owner's
+-- rights, takes a row only if the caller has shown it can read that very row.
 create function keyturn.propose(p_changes jsonb, p_note text default '', p_valid_for interval default interval '1 day')
   returns table (proposal_id uuid, content_hash text)
   language plpgsql
+  set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
+  set extra_float_digits = 3 set bytea_output = 'hex'
   as $$
 declare
-  named jsonb := p_changes;
+  change   jsonb;
+  position bigint;
+  target   keyturn.protected;
+  seen     jsonb;
+  named    jsonb := '[]'::jsonb;
 begin
-  if jsonb_typeof(p_changes) = 'array' then
-    select coalesce(jsonb_agg(case
-             when jsonb_typeof(change) = 'object' and to_regclass(change ->> 'table') is not null
-               then change || jsonb_build_object('table', to_regclass(change ->> 'table')::oid::text)
-             else change end order by position), '[]'::jsonb)
-      into named
-      from jsonb_array_elements(p_changes) with ordinality as listed (change, position);
+  if jsonb_typeof(p_changes) is distinct from 'array' then
+    return query select * from keyturn.record_proposal(p_changes, p_note, p_valid_for);
+    return;
   end if;
+
+  for change, position in select listed.change, listed.position from jsonb_array_elements(p_changes) with ordinality as listed (change, position) loop
+    if jsonb_typeof(change) = 'object' and to_regclass(change ->> 'table') is not null then
+      select * into target from keyturn.protected where relation = to_regclass(change ->> 'table');
+      change := (change - 'seen') || jsonb_build_object('table', to_regclass(change ->> 'table')::oid::text);
+      if target.relation is not null and change ->> 'operation' in ('update', 'delete') and jsonb_typeof(change -> 'key') = 'object' then
+        begin
+          execute format('select %s from %s t where %s', keyturn.image(target.derived), target.relation, keyturn.key_condition(target.relation, target.key_columns))
+            into seen using change -> 'key';
+        exception when insufficient_privilege then
+          seen := null;
+        end;
+        change := change || jsonb_build_object('seen', seen);
+      end if;
+    end if;
+    named := named || jsonb_build_array(change);
+  end loop;
   return query select * from keyturn.record_proposal(named, p_note, p_valid_for);
 end $$;
 
@@ -408,7 +450,7 @@ begin
       exit;
     end if;
     locate := keyturn.key_condition(change.relation, target.key_columns);
-    execute format('select to_jsonb(t) from %s t where %s for update', change.relation, locate) into current_ using change.key;
+    execute format('select %s from %s t where %s for update', keyturn.image(target.derived), change.relation, locate) into current_ using change.key;
     if current_ is distinct from change.before then
       result := jsonb_build_object('status', 'stale', 'change', change.seq, 'reason', case
         when change.operation = 'insert' then format('%s already has a row with key %s', change.relation, change.key)
@@ -432,12 +474,12 @@ begin
       -- Each write hands back the row as it was written, which is what gets held against the approval.
       written := null;
       if change.operation = 'insert' then
-        execute format('insert into %1$s as t (%2$s) select %2$s from jsonb_populate_record(null::%1$s, $1) returning to_jsonb(t)',
-          change.relation, (select string_agg(format('%I', name), ', ') from unnest(change.columns) as name)) into written using change.after;
+        execute format('insert into %1$s as t (%2$s) select %2$s from jsonb_populate_record(null::%1$s, $1) returning %3$s',
+          change.relation, (select string_agg(format('%I', name), ', ') from unnest(change.columns) as name), keyturn.image(target.derived)) into written using change.after;
       elsif change.operation = 'update' then
         -- The row set is one column wide or many; "row" makes the two cases read alike.
-        execute format('update %1$s t set (%2$s) = (select %2$s from jsonb_populate_record(null::%1$s, $2)) where %3$s returning to_jsonb(t)',
-          change.relation, (select string_agg(format('%I', name), ', ') from unnest(change.columns) as name), locate)
+        execute format('update %1$s t set (%2$s) = (select %2$s from jsonb_populate_record(null::%1$s, $2)) where %3$s returning %4$s',
+          change.relation, (select string_agg(format('%I', name), ', ') from unnest(change.columns) as name), locate, keyturn.image(target.derived))
           into written using change.key, change.after;
       else
         execute format('delete from %s t where %s', change.relation, locate) using change.key;
@@ -466,6 +508,19 @@ begin
   return result;
 end $$;
 
+-- ---------------------------------------------------------------- who may see what
+
+-- A proposal holds rows of the tables it would change. An agent reads the proposals it made
+-- and no others. An approver reads them all: reading them is the approver's job.
+alter table keyturn.proposals enable row level security;
+alter table keyturn.changes enable row level security;
+
+create policy own_or_approver on keyturn.proposals for select
+  using (proposed_by = session_user or pg_has_role(session_user, 'keyturn_approver', 'MEMBER'));
+create policy own_or_approver on keyturn.changes for select
+  using (pg_has_role(session_user, 'keyturn_approver', 'MEMBER')
+         or exists (select from keyturn.proposals where proposals.id = changes.proposal_id and proposals.proposed_by = session_user));
+
 -- ---------------------------------------------------------------- who may do what
 
 revoke all on schema keyturn from public;
@@ -478,4 +533,4 @@ grant select on keyturn.proposals, keyturn.changes, keyturn.protected to keyturn
 grant execute on function keyturn.propose(jsonb, text, interval), keyturn.record_proposal(jsonb, text, interval) to keyturn_agent;
 grant execute on function keyturn.apply(uuid) to keyturn_agent, keyturn_approver;
 grant execute on function keyturn.approve(uuid, text), keyturn.reject(uuid, text) to keyturn_approver;
-grant execute on function keyturn.hash_of(uuid), keyturn.caller_is(name), keyturn.shape_of(regclass) to keyturn_agent, keyturn_approver;
+grant execute on function keyturn.hash_of(uuid), keyturn.caller_is(name), keyturn.shape_of(regclass), keyturn.key_condition(regclass, text[]), keyturn.image(text[]) to keyturn_agent, keyturn_approver;

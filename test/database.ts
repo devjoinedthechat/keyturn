@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import pg from "pg";
 import { inject } from "vitest";
 import { logins, password } from "./postgres.ts";
@@ -26,7 +26,11 @@ export class Database {
     await owner.end();
 
     const installer = await database.as(logins.owner);
-    await installer.query(await readFile(new URL("../sql/001_core.sql", import.meta.url), "utf8"));
+    for (const file of (await readdir(new URL("../sql/", import.meta.url)))
+      .filter((name) => name.endsWith(".sql"))
+      .sort()) {
+      await installer.query(await readFile(new URL(`../sql/${file}`, import.meta.url), "utf8"));
+    }
     await installer.query(schema);
     return database;
   }
@@ -46,8 +50,13 @@ export class Database {
     return client;
   }
 
+  adopt(client: pg.Client): void {
+    this.clients.push(client);
+  }
+
   async close(): Promise<void> {
-    await Promise.all(this.clients.map((client) => client.end()));
+    // A connection a test cut off on purpose is already closed.
+    await Promise.allSettled(this.clients.map((client) => client.end()));
   }
 }
 
@@ -80,4 +89,19 @@ export async function apply(
 ): Promise<{ status: string; reason?: string; changes?: number }> {
   const result = await client.query("select keyturn.apply($1) as outcome", [proposal]);
   return result.rows[0].outcome;
+}
+
+/** A connection as the server's superuser, for what only an administrator does: making logins and wrong grants. */
+export async function administrator(database: Database): Promise<pg.Client> {
+  const server = inject("postgres");
+  const client = new pg.Client({
+    host: server.host,
+    port: server.port,
+    user: server.superuser,
+    password: server.password,
+    database: database.name,
+  });
+  await client.connect();
+  database.adopt(client);
+  return client;
 }
