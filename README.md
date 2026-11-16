@@ -1,10 +1,37 @@
-# Keyturn
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="" width="112" height="112">
+  </picture>
+</p>
 
-**PostgreSQL refuses an AI agent's write until a person has approved that exact change.**
+<h1 align="center">Keyturn</h1>
+
+<p align="center">
+  <b>PostgreSQL refuses an AI agent's write until a person has approved that exact change.</b><br>
+  The check is in the database's own privileges, so it holds whatever code reaches the database.
+</p>
+
+<p align="center">
+  <a href="https://github.com/devjoinedthechat/keyturn/actions/workflows/ci.yml"><img src="https://github.com/devjoinedthechat/keyturn/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-15803d" alt="MIT licence"></a>
+  <img src="https://img.shields.io/badge/postgresql-15%E2%80%9318-15803d" alt="PostgreSQL 15 to 18">
+  <img src="https://img.shields.io/badge/node-%E2%89%A5%2022.18-15803d" alt="node >= 22.18">
+  <img src="https://img.shields.io/badge/typescript-strict-15803d" alt="TypeScript strict">
+</p>
+
+<p align="center">
+  <a href="#what-it-looks-like">What it looks like</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#what-it-guarantees-and-what-it-does-not">Guarantees</a> ·
+  <a href="#cost">Cost</a> ·
+  <a href="#how-it-differs">How it differs</a>
+</p>
 
 An agent connected through Keyturn cannot change a protected table. It can only propose. The database applies a proposal only when a different login approved those exact rows, and the rows still look the way they did when the proposal was made.
 
-The check is not in the agent, a framework hook or a proxy. It is in the database's own privileges, so it holds whatever code reaches the database.
+Nothing depends on the agent, a framework hook or a proxy behaving.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">

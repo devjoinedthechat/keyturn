@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 112 112" width="112" height="112" fill="none" role="img" aria-label="keyturn">
+  <title>keyturn</title>
+  <!-- the key: a person's approval -->
+  <circle cx="48" cy="56" r="20" stroke="#1f2328" stroke-width="6"/>
+  <path d="M68 56 H102 M86 56 V73 M100 56 V68" stroke="#1f2328" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- the turn: only then is the change written -->
+  <path d="M48 21 A35 35 0 0 0 48 91" stroke="#15803d" stroke-width="7" stroke-linecap="round"/>
+</svg>
