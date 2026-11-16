@@ -1,0 +1,22 @@
+# private working documents and local-only settings
+.build-plan.md
+.failure-log.md
+.dev-log.md
+.private-patterns
+.research/
+
+node_modules/
+coverage/
+dist/
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# credentials and keys
+*.pem
+*.p12
+*.key
+id_rsa*
+id_ed25519*
+.architecture-target.html

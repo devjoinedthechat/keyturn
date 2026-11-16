@@ -1,0 +1,6 @@
+# Install scripts are not allowed to run. These are optional speed-ups pulled in by
+# Testcontainers; the tests work without them.
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false
