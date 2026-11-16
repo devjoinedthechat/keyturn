@@ -204,7 +204,7 @@ test("a table that has changed shape, has triggers, or is the target of a cascad
     expect(await sound()).toBe(true);
   } finally {
     await owner.query(
-      "drop table entries; drop trigger noop on ledger; drop function noop(); alter table ledger drop column added; select keyturn.protect('ledger')",
+      "drop table entries; drop trigger noop on ledger; drop function noop(); select keyturn.drop_view('ledger'); alter table ledger drop column added; select keyturn.protect('ledger')",
     );
   }
 });

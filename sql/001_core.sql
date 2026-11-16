@@ -45,7 +45,9 @@ create table keyturn.proposals (
   -- The login that made it. Taken from the connection, never from anything the caller passes.
   proposed_by  name        not null,
   note         text        not null default '' check (length(note) <= 2000),
-  content_hash text        not null,
+  -- The hash of the content that was approved. Empty until someone approves: before that
+  -- there is nothing to hold the content to, and what a reviewer is shown is worked out afresh.
+  content_hash text,
   status       text        not null default 'pending'
                  check (status in ('pending', 'approved', 'rejected', 'applied', 'stale', 'failed')),
   proposed_at  timestamptz not null default clock_timestamp(),
@@ -55,7 +57,11 @@ create table keyturn.proposals (
   reason       text check (reason is null or length(reason) <= 2000),
   finished_at  timestamptz,
   outcome      jsonb,
-  check ((status in ('pending')) = (decided_by is null)),
+  -- Nothing undecided has a decider, and nothing approved lacks one or lacks the hash that was approved.
+  check (status <> 'pending' or decided_by is null),
+  check (status not in ('approved', 'rejected', 'applied') or decided_by is not null),
+  check (status not in ('pending', 'rejected') or content_hash is null),
+  check (status not in ('approved', 'applied') or content_hash is not null),
   -- Nobody approves or rejects their own proposal.
   check (decided_by is null or decided_by <> proposed_by)
 );
@@ -64,7 +70,8 @@ create table keyturn.proposals (
 create table keyturn.changes (
   proposal_id uuid     not null references keyturn.proposals (id),
   seq         integer  not null,
-  relation    regclass not null references keyturn.protected (relation),
+  -- Not held to the list of protected tables: a proposal is kept after its table has left Keyturn's care.
+  relation    regclass not null,
   shape       text     not null,
   operation   text     not null check (operation in ('insert', 'update', 'delete')),
   key         jsonb    not null,
@@ -160,6 +167,7 @@ create function keyturn.record_proposal(p_changes jsonb, p_note text, p_valid_fo
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex'
   as $$
+<<given_>>
 declare
   change    jsonb;
   target    keyturn.protected;
@@ -172,7 +180,6 @@ declare
   unknown   text;
   seq       integer := 0;
   proposal  uuid := gen_random_uuid();
-  digest    text;
 begin
   if jsonb_typeof(p_changes) is distinct from 'array' or jsonb_array_length(p_changes) = 0 then
     raise exception 'keyturn: a proposal is a list of at least one change';
@@ -184,9 +191,9 @@ begin
     raise exception 'keyturn: a proposal is valid for up to 30 days';
   end if;
 
-  -- The proposal's row comes first, so its changes can refer to it. Its hash is filled in below.
-  insert into keyturn.proposals (id, proposed_by, note, content_hash, expires_at)
-    values (proposal, session_user, coalesce(p_note, ''), '', clock_timestamp() + p_valid_for);
+  -- The proposal's row comes first, so its changes can refer to it.
+  insert into keyturn.proposals (id, proposed_by, note, expires_at)
+    values (proposal, session_user, coalesce(p_note, ''), clock_timestamp() + p_valid_for);
 
   for change in select value from jsonb_array_elements(p_changes) loop
     seq := seq + 1;
@@ -262,13 +269,16 @@ begin
       end if;
     end if;
 
+    -- One change to a row in one proposal. A second would be approved against a row the first has already altered.
+    if key <> '{}'::jsonb and exists (select from keyturn.changes c where c.proposal_id = proposal and c.relation = target.relation and c.key = given_.key) then
+      raise exception 'keyturn: change %: the row % of % already has a change in this proposal', seq, key, target.relation;
+    end if;
+
     insert into keyturn.changes (proposal_id, seq, relation, shape, operation, key, before, after, columns)
       values (proposal, seq, target.relation, target.shape, operation, key, before, after, columns);
   end loop;
 
-  digest := keyturn.hash_of(proposal);
-  update keyturn.proposals set content_hash = digest where id = proposal;
-  return query select proposal, digest;
+  return query select proposal, keyturn.hash_of(proposal);
 end $$;
 
 -- What a caller uses. It runs with the caller's own rights, for two reasons.
@@ -363,11 +373,11 @@ begin
   if proposal.expires_at <= clock_timestamp() then
     raise exception 'keyturn: the proposal expired at %', proposal.expires_at;
   end if;
-  -- Held against what is stored now, not against the hash written when it was proposed.
-  if p_content_hash is distinct from keyturn.hash_of(p_proposal_id) or p_content_hash is distinct from proposal.content_hash then
+  -- Held against what the proposal holds at this moment. From here on that hash is the proposal's.
+  if p_content_hash is distinct from keyturn.hash_of(p_proposal_id) then
     raise exception 'keyturn: that is not the content of this proposal';
   end if;
-  update keyturn.proposals set status = 'approved', decided_by = session_user, decided_at = clock_timestamp()
+  update keyturn.proposals set status = 'approved', content_hash = p_content_hash, decided_by = session_user, decided_at = clock_timestamp()
    where id = p_proposal_id;
 end $$;
 

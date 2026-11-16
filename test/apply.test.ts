@@ -288,7 +288,7 @@ describe("a table that changes under a proposal", () => {
       ).toMatch(/^[0-9a-f]{64}$/);
     } finally {
       await owner.query(
-        "alter table items drop column added_later; select keyturn.protect('items')",
+        "select keyturn.drop_view('items'); alter table items drop column added_later; select keyturn.protect('items')",
       );
     }
   });
