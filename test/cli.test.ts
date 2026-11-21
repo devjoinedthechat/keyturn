@@ -455,4 +455,22 @@ describe("what a decision rests on, from the terminal", () => {
     expect(asJson.waits[0]).toMatchObject({ seq: null, rule: "small_charges" });
     await new Keyturn(await database.as(logins.alice)).reject(made.id);
   });
+
+  test("a row whose key the table makes for itself is shown, with no key yet", async () => {
+    await owner.query(`
+      create table remarks (id serial primary key, account integer references accounts (id), body text not null);
+      select keyturn.protect('remarks');
+      grant select on remarks to keyturn_agent, keyturn_approver;
+    `);
+    const proposer = new Keyturn(await database.as(logins.agent));
+    const made = await proposer.propose([
+      { table: "remarks", operation: "insert", values: { account: 1, body: "Called back." } },
+    ]);
+    const shown = await keyturn(logins.alice, ["show", made.id]);
+    expect(shown.code).toBe(0);
+    expect(shown.out).toContain("#1 insert public.remarks");
+    expect(shown.out).toMatch(/body\s+"Called back."/);
+    expect(shown.out).toContain("refers to public.accounts  account = 1");
+    await new Keyturn(await database.as(logins.alice)).reject(made.id);
+  });
 });

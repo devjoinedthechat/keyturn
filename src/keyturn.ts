@@ -206,7 +206,7 @@ export class Keyturn {
       changed: boolean;
     }>(
       `select seq, relation as "table", operation,
-              (select jsonb_object_agg(part.key, part.value #>> '{}') from jsonb_each(d.key) as part) as key,
+              coalesce((select jsonb_object_agg(part.key, part.value #>> '{}') from jsonb_each(d.key) as part), '{}') as key,
               column_name as "column", before, after,
               before_kind as "beforeKind", after_kind as "afterKind", changed
          from keyturn.diff($1, $2, $3) as d`,
@@ -243,7 +243,7 @@ export class Keyturn {
       kind: Kind | null;
     }>(
       `select seq, via, relation as "table",
-              (select jsonb_object_agg(part.key, part.value #>> '{}') from jsonb_each(r.key) as part) as key,
+              coalesce((select jsonb_object_agg(part.key, part.value #>> '{}') from jsonb_each(r.key) as part), '{}') as key,
               state, column_name as "column", value, kind
          from keyturn.refers_to($1, $2, $3) as r`,
       [id, options.from ?? 1, options.count ?? 100],
