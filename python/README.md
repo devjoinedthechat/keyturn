@@ -39,7 +39,9 @@ with psycopg.connect("postgresql://support_agent@localhost/shop", autocommit=Tru
 | --------------------------------- | ---------------------- | --------------------------------------------------------------------------------- |
 | `propose`, `apply`, `decision`    | An agent               | Propose rows, wait for a decision, write what was approved                        |
 | `waiting`, `extent`, `diff`       | An approver            | Read what would change, values as PostgreSQL writes them                          |
+| `refers_to`, `waits_because`      | An approver            | The rows a proposal points to, and why it has come to a person                    |
 | `approve`, `reject`               | An approver            | Decide. An approval names the hash of what was read                               |
+| `revert`                          | An approver            | Take an applied proposal back: every row as it was before                         |
 | `doctor`, `verify_audit`          | The owner, an approver | Check the setup and the audit log                                                 |
 | `recent`, `history`, `audit_head` | Either                 | The latest proposals, what happened to one, and one value for the whole audit log |
 

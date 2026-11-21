@@ -98,6 +98,45 @@ class RowDiff:
 
 
 @dataclass(frozen=True)
+class ReferenceColumn:
+    column: str
+    #: The value as PostgreSQL writes it.
+    value: str | None
+    kind: Kind
+
+
+@dataclass(frozen=True)
+class Reference:
+    """A row that a proposal's row points to through a foreign key, as it is when asked for.
+
+    It is no part of what an approval names.
+    """
+
+    #: The change it belongs to.
+    seq: int
+    #: The foreign key's name.
+    via: str
+    table: str
+    #: The pointing columns and their values, as PostgreSQL writes them.
+    key: dict[str, str | None]
+    #: ``missing``: no such row that this login's policies let through.
+    #: ``unreadable``: this login may not read the table.
+    state: Literal["shown", "missing", "unreadable"]
+    columns: list[ReferenceColumn]
+
+
+@dataclass(frozen=True)
+class Waiting:
+    """One reason a waiting proposal has come to a person."""
+
+    #: The change it is about, or ``None`` when it is about the whole proposal.
+    seq: int | None
+    #: The rule that did not cover the change, or ``None`` when no rule is in question.
+    rule: str | None
+    because: str
+
+
+@dataclass(frozen=True)
 class Extent:
     table: str
     operation: Literal["insert", "update", "delete"]
@@ -234,6 +273,37 @@ class Keyturn:
                 )
             )
         return result
+
+    def refers_to(self, proposal_id: str, *, start: int = 1, count: int = 100) -> list[Reference]:
+        """The rows a proposal's rows point to through foreign keys.
+
+        For ``count`` changes from change ``start``, read with this login's rights, as they
+        are now.
+        """
+        rows = self._run(
+            """select seq, via, relation,
+                      coalesce((select jsonb_object_agg(part.key, part.value #>> '{}')
+                                  from jsonb_each(r.key) as part), '{}') as key,
+                      state, column_name, value, kind
+                 from keyturn.refers_to(%s, %s, %s) as r""",
+            (proposal_id, start, count),
+        )
+        result: list[Reference] = []
+        for row in rows:
+            if not result or (result[-1].seq, result[-1].via) != (row["seq"], row["via"]):
+                result.append(
+                    Reference(row["seq"], row["via"], row["relation"], row["key"], row["state"], [])
+                )
+            if row["column_name"] is not None:
+                result[-1].columns.append(
+                    ReferenceColumn(row["column_name"], row["value"], row["kind"])
+                )
+        return result
+
+    def waits_because(self, proposal_id: str) -> list[Waiting]:
+        """Why a waiting proposal has come to a person. For an approver."""
+        rows = self._run("select seq, rule, because from keyturn.waits_because(%s)", (proposal_id,))
+        return [Waiting(**row) for row in rows]
 
     def approve(self, proposal_id: str, content_hash: str) -> None:
         """Approves the content with this hash, and no other.

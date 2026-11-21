@@ -7,11 +7,14 @@ from keyturn.client import (
     Keyturn,
     Outcome,
     Proposal,
+    Reference,
+    ReferenceColumn,
     Refused,
     Reverted,
     RowDiff,
     Step,
     Undecided,
+    Waiting,
 )
 
 __all__ = [
@@ -21,9 +24,12 @@ __all__ = [
     "Keyturn",
     "Outcome",
     "Proposal",
+    "Reference",
+    "ReferenceColumn",
     "Refused",
     "Reverted",
     "RowDiff",
     "Step",
     "Undecided",
+    "Waiting",
 ]

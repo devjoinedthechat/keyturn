@@ -45,6 +45,12 @@ def server() -> Iterator[PostgresContainer]:
                   select n, 'holder ' || n from generate_series(1, 200) n;
                 select keyturn.protect('accounts');
                 grant select on accounts to keyturn_agent, keyturn_approver;
+                create table transfers (
+                  id integer primary key, account integer references accounts (id),
+                  amount numeric(30, 4) not null
+                );
+                select keyturn.protect('transfers');
+                grant select on transfers to keyturn_agent, keyturn_approver;
                 """
             )
         yield container
@@ -303,3 +309,38 @@ def test_taking_an_applied_change_back(connections: dict[str, psycopg.Connection
     proposal = alice.proposal(made.id)
     assert proposal is not None and proposal.status == "reverted"
     assert agent.apply(made.id).status == "reverted"
+
+
+def test_what_a_decision_rests_on(connections: dict[str, psycopg.Connection[Any]]) -> None:
+    agent, alice = Keyturn(connections["agent"]), Keyturn(connections["alice"])
+    made = agent.propose(
+        [
+            {
+                "table": "transfers",
+                "operation": "insert",
+                "values": {"id": 1, "account": 5, "amount": 9},
+            },
+            {
+                "table": "transfers",
+                "operation": "insert",
+                "values": {"id": 2, "account": 999, "amount": 9},
+            },
+        ]
+    )
+    found, missing = alice.refers_to(made.id)
+    assert (found.seq, found.table, found.key, found.state) == (
+        1,
+        "public.accounts",
+        {"account": "5"},
+        "shown",
+    )
+    assert ("holder", "holder 5", "string") in [
+        (column.column, column.value, column.kind) for column in found.columns
+    ]
+    assert (missing.seq, missing.state, missing.columns) == (2, "missing", [])
+
+    (reason,) = alice.waits_because(made.id)
+    assert reason.seq is None and "no rule lets a change to public.transfers" in reason.because
+    with pytest.raises(Refused):
+        agent.waits_because(made.id)
+    alice.reject(made.id)
