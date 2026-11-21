@@ -787,3 +787,61 @@ describe("what a decision rests on, on the page", () => {
     await page.context().close();
   });
 });
+
+describe("taking a change back, on the page", () => {
+  const applied = async (id: number, note: string) => {
+    const made = await agent.propose([refund(id)], { note });
+    const alice = new Keyturn(await database.as(logins.alice));
+    const proposal = await alice.proposal(made.id);
+    await alice.approve(made.id, proposal?.contentHash ?? "");
+    await agent.apply(made.id);
+    return made.id;
+  };
+
+  test("an approver takes an applied change back, with a reason that stays on record", async () => {
+    const id = await applied(320, "Refund order 320, wrongly.");
+    expect((await order(320)).status).toBe("refunded");
+    const review = await reviewAs(logins.bob);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.goto(`http://127.0.0.1:${review.port}/#${id}`);
+    await page.locator("#revert").click();
+    const found = await new AxeBuilder({ page }).analyze();
+    expect(found.violations.map((violation) => violation.id)).toEqual([]);
+    await page.locator("#revert-reason").fill("It was the wrong order.");
+    await page.locator("#confirm-revert").click();
+    await expect
+      .poll(() => page.locator("#keys").innerText(), { timeout: 10_000 })
+      .toContain("has been taken back");
+    expect((await order(320)).status).toBe("paid");
+    expect(await page.locator(".banner").innerText()).toContain("It was the wrong order.");
+    expect(await page.locator("#revert").count()).toBe(0);
+    expect((await agent.proposal(id))?.status).toBe("reverted");
+    await page.context().close();
+  });
+
+  test("says so, and takes nothing back, when a row has been written to since", async () => {
+    const id = await applied(321, "Refund order 321.");
+    await owner.query("update orders set memo = 'looked at' where id = 321");
+    const review = await reviewAs(logins.bob);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.goto(`http://127.0.0.1:${review.port}/#${id}`);
+    await page.locator("#revert").click();
+    await page.locator("#confirm-revert").click();
+    await expect.poll(() => page.locator(".refused").count(), { timeout: 10_000 }).toBe(1);
+    expect(await page.locator(".refused").innerText()).toContain("Nothing was taken back");
+    expect((await order(321)).status).toBe("refunded");
+    await page.context().close();
+  });
+
+  test("is not offered to a login that cannot approve", async () => {
+    const id = await applied(322, "Refund order 322.");
+    const review = await reviewAs(logins.agent);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.goto(`http://127.0.0.1:${review.port}/#${id}`);
+    await expect
+      .poll(() => page.locator("#keys").innerText(), { timeout: 10_000 })
+      .toContain("Applied: 1 row written.");
+    expect(await page.locator("#revert").count()).toBe(0);
+    await page.context().close();
+  });
+});

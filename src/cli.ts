@@ -23,6 +23,7 @@ For an approver
   keyturn approve <proposal>      Show it, ask, approve. --apply writes it too
   keyturn reject <proposal>       --reason "..." says why
   keyturn apply <proposal>        Write an approved proposal's changes
+  keyturn revert <proposal>       Take an applied proposal back: every row as it was before. --yes does not ask
   keyturn verify-audit            Check the audit log holds together. Exit 1 if it does not
 
 For an agent
@@ -80,6 +81,7 @@ const commands: Record<string, string | null> = {
   approve: "a proposal",
   reject: "a proposal",
   apply: "a proposal",
+  revert: "a proposal",
   review: null,
   tools: null,
   "verify-audit": null,
@@ -276,6 +278,34 @@ export async function run(argv: string[], io: Io): Promise<number> {
         const outcome = await keyturn.apply(id);
         print({ id, outcome }, told(outcome));
         return outcome.status === "applied" ? 0 : 1;
+      }
+      case "revert": {
+        const id = await named(db, need("a proposal"));
+        if (!values.yes) {
+          if (io.ask === undefined) {
+            throw new Usage(
+              "Nobody is at the terminal to ask. Read the proposal with keyturn show, then: keyturn revert <proposal> --yes",
+            );
+          }
+          const all = await shown(id);
+          io.out(renderProposal(all.proposal, all.extent, all.rows, style, all));
+          io.out("");
+          const answer = await io.ask(
+            'Take this back? Every row above is put as it was before. Type "revert", or anything else to leave it: ',
+          );
+          if (answer.trim().toLowerCase() !== "revert") {
+            io.out("Left as it was.");
+            return 1;
+          }
+        }
+        const outcome = await keyturn.revert(id, values.reason);
+        print(
+          { id, outcome },
+          outcome.status === "reverted"
+            ? `Taken back: ${outcome.changes ?? 0} row${outcome.changes === 1 ? "" : "s"} put as ${outcome.changes === 1 ? "it was" : "they were"}.`
+            : `Nothing was taken back: ${plain(outcome.reason ?? "a row stood in the way")}.`,
+        );
+        return outcome.status === "reverted" ? 0 : 1;
       }
       case "review": {
         const port = values.port === undefined ? undefined : Number(values.port);

@@ -194,6 +194,7 @@ keyturn show 0f65fb6a        # the rows, before and after
 keyturn approve 0f65fb6a     # shows it, asks, approves what was shown
 keyturn reject 0f65fb6a --reason "..."
 keyturn review               # the same on a page, on this machine only
+keyturn revert 0f65fb6a      # take an applied change back
 ```
 
 The review page puts the size of the change first and sends the hash of what was on screen with the approval. It adds no power: it calls the same database functions as the approver's login.
@@ -205,6 +206,23 @@ A refund is an id and an amount; whether it is right is in the payment it points
 In a small study, reviewers shown 36 proposed refunds as rows alone could not decide one of them. Shown the same refunds with this beside them, they caught all 30 wrong ones and approved all 6 right ones. The reviewers were language models, so this says the screen holds what a decision needs, not that a tired person reads it. [docs/catch-rate.md](docs/catch-rate.md) has the method and its limits.
 
 Its server listens on 127.0.0.1, needs a key made for each run, refuses requests from other sites, and loads nothing but its own three files.
+
+## Taking a change back
+
+A proposal holds every row as it was before, so an applied change can be put back exactly.
+
+```text
+$ keyturn revert 0f65fb6a --reason "Refunded the wrong order."
+Taken back: 12 rows put as they were.
+```
+
+| What was written | What taking it back does                       |
+| ---------------- | ---------------------------------------------- |
+| An inserted row  | It is deleted                                  |
+| An updated row   | The columns that were set get their old values |
+| A deleted row    | It is inserted again, with the key it had      |
+
+It is an approver's act, never an agent's, and it is all or nothing. If one of the rows has been written to since, somebody's later work is there, and nothing is taken back: the command names the row. The review page has the same on an applied proposal.
 
 ## Changes that need no person
 

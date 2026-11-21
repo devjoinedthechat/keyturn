@@ -63,7 +63,7 @@ create table keyturn.proposals (
   -- there is nothing to hold the content to, and what a reviewer is shown is worked out afresh.
   content_hash text,
   status       text        not null default 'pending'
-                 check (status in ('pending', 'approved', 'rejected', 'applied', 'stale', 'failed')),
+                 check (status in ('pending', 'approved', 'rejected', 'applied', 'stale', 'failed', 'reverted')),
   proposed_at  timestamptz not null default clock_timestamp(),
   expires_at   timestamptz not null,
   decided_by   name,
@@ -73,9 +73,9 @@ create table keyturn.proposals (
   outcome      jsonb,
   -- Nothing undecided has a decider, and nothing approved lacks one or lacks the hash that was approved.
   check (status <> 'pending' or decided_by is null),
-  check (status not in ('approved', 'rejected', 'applied') or decided_by is not null),
+  check (status not in ('approved', 'rejected', 'applied', 'reverted') or decided_by is not null),
   check (status not in ('pending', 'rejected') or content_hash is null),
-  check (status not in ('approved', 'applied') or content_hash is not null),
+  check (status not in ('approved', 'applied', 'reverted') or content_hash is not null),
   -- Nobody approves or rejects their own proposal.
   check (decided_by is null or decided_by <> proposed_by)
 );
@@ -96,6 +96,10 @@ create table keyturn.changes (
   after       jsonb,
   -- The columns the proposal sets. Only these are written on apply.
   columns     text[]   not null,
+  -- The row as the table held it after the write, where that is more than "after" says: an
+  -- insert with the columns the table filled in, among them a key it made itself. Kept so
+  -- that the change can be taken back. No part of the proposal's content or its hash.
+  as_written  jsonb,
   primary key (proposal_id, seq),
   check ((operation = 'insert') = (before is null)),
   check ((operation = 'delete') = (after is null))
@@ -120,7 +124,7 @@ create table keyturn.audit (
   at          timestamptz not null default clock_timestamp(),
   -- The login on the connection.
   actor       name        not null default session_user,
-  event       text        not null check (event in ('opened', 'approved', 'approved_by_rule', 'rejected', 'applied', 'stale', 'failed')),
+  event       text        not null check (event in ('opened', 'approved', 'approved_by_rule', 'rejected', 'applied', 'stale', 'failed', 'reverted')),
   detail      jsonb       not null default '{}',
   prev_hash   text        not null,
   hash        text        not null
@@ -799,7 +803,7 @@ begin
   if not found then
     raise exception 'keyturn: no such proposal';
   end if;
-  if proposal.status in ('applied', 'stale', 'failed') then
+  if proposal.status in ('applied', 'stale', 'failed', 'reverted') then
     return proposal.outcome;
   end if;
   if proposal.expires_at <= clock_timestamp() then
@@ -937,6 +941,9 @@ begin
       end if;
       if target.exact and change.operation = 'update' and written is distinct from change.after then
         raise exception 'keyturn: change %: the row is not what was approved after the write', change.seq using errcode = 'KT001';
+      end if;
+      if written is distinct from change.after then
+        update keyturn.changes c set as_written = written where c.proposal_id = p_proposal_id and c.seq = change.seq;
       end if;
     end loop;
   exception when others then

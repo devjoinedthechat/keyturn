@@ -50,21 +50,35 @@ A condition that cannot be worked out for a row, or that gives neither true nor 
 
 ## The record
 
-Every step of a proposal is an entry in `keyturn.audit`: opened, approved, approved by a rule, rejected, applied, stale or failed. The entry is written in the same transaction as the step, with the login that took it.
+Every step of a proposal is an entry in `keyturn.audit`: opened, approved, approved by a rule, rejected, applied, stale, failed or reverted. The entry is written in the same transaction as the step, with the login that took it.
 
 - Entries are never updated, deleted or truncated. Triggers refuse it, the owner included.
 - Each entry carries the hash of the one before it for the same proposal. `keyturn.verify_audit()` reports an entry that was altered, one that is missing, and a proposal whose state has no entry behind it.
 - `keyturn.audit_head()` gives one value for the whole log. Someone who can switch the triggers off can rewrite the log so that it verifies; a head value kept outside the database shows that too.
 
+## Taking a change back
+
+An approver may take an applied proposal back. Every row it wrote is put as the proposal recorded it before the change.
+
+| Holds                                 | How                                                                             |
+| ------------------------------------- | ------------------------------------------------------------------------------- |
+| Only a person's login does it         | It is for `keyturn_approver`. An agent is refused                               |
+| All of it or none                     | One row that cannot be put back leaves every row as it is                       |
+| Nobody's later work is written over   | Each row is locked and must still be as the proposal left it                    |
+| The rules that forbid hold for it too | Putting a row back is a write, and is held against them as one                  |
+| It is on record, once                 | The proposal becomes `reverted`, with the login and the reason in the audit log |
+
+A proposal that was taken back is not applied again.
+
 ## Who it holds against
 
-| Actor                                      | Cannot                                                                                                                |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| The agent's role                           | Write a protected table; approve or reject; apply a proposal that is not approved; change a proposal after it is made |
-| The agent's role, with the record          | Add, alter or remove an audit entry; read another agent's entries; write or read a rule                               |
-| The agent's own code, wrong or manipulated | Do anything the agent's role cannot. The guarantee does not depend on that code                                       |
-| An approver                                | Approve their own proposal; approve content other than what they name; approve a change a rule forbids                |
-| Two connections at once                    | Apply a proposal twice; apply it against rows that have changed                                                       |
+| Actor                                      | Cannot                                                                                                                                    |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| The agent's role                           | Write a protected table; approve or reject; apply a proposal that is not approved; change a proposal after it is made; take a change back |
+| The agent's role, with the record          | Add, alter or remove an audit entry; read another agent's entries; write or read a rule                                                   |
+| The agent's own code, wrong or manipulated | Do anything the agent's role cannot. The guarantee does not depend on that code                                                           |
+| An approver                                | Approve their own proposal; approve content other than what they name; approve a change a rule forbids                                    |
+| Two connections at once                    | Apply a proposal twice; apply it against rows that have changed                                                                           |
 
 ## Outside the claim
 
@@ -74,7 +88,7 @@ Every step of a proposal is an entry in `keyturn.audit`: opened, approved, appro
 - **The rows shown beside a proposal.** The rows a proposal points to, and why it waits, are read when asked for. They are not in the hash an approval names, and may have changed by the time the change is written. A rule is read then; they are not.
 - **Effects outside the database.** Emails, payments, calls to other services.
 - **Row-level security as a limit on what may be proposed.** Policies decide which rows an agent can see and name. They do not check the row an agent proposes to insert, or what it proposes a row should become: the approver does. A rule on such a table needs a condition that does the same.
-- **What a table's cascades do to other tables.** The approved rows are checked after the write. Rows a cascade changes elsewhere are that table's own design.
+- **What a table's cascades do to other tables.** The approved rows are checked after the write. Rows a cascade changes elsewhere are that table's own design. Taking the change back puts the proposal's own rows back and not those.
 
 ## How it differs from what exists
 

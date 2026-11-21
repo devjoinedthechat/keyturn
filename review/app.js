@@ -358,7 +358,17 @@ function drawSheet() {
     ),
   );
 
-  if (proposal.outcome?.reason) {
+  if (proposal.status === "reverted") {
+    parts.push(
+      el(
+        "p",
+        { class: "banner" },
+        "This change was applied and has been taken back: every row is as it was before.",
+        proposal.outcome?.reason ? " " : null,
+        proposal.outcome?.reason ? written(proposal.outcome.reason) : null,
+      ),
+    );
+  } else if (proposal.outcome?.reason) {
     parts.push(
       el("p", { class: "banner" }, "Nothing was written: ", written(proposal.outcome.reason)),
     );
@@ -974,6 +984,67 @@ function drawKeys() {
         `Applied: ${many(proposal.outcome?.changes ?? total, "row")} written.`,
       ),
     );
+    // Taking it back is a person's act, as approving was.
+    if (state.me.approver && lost.hidden && state.mode === "revert") {
+      const why = el("textarea", {
+        id: "revert-reason",
+        maxlength: "2000",
+        placeholder: "Why it is taken back. It stays on record.",
+        "aria-label": "Why it is taken back, for the record",
+      });
+      second.append(
+        el(
+          "p",
+          {},
+          `Every row is put as it was before the change. If one of them has been written to since, nothing is taken back.`,
+        ),
+        why,
+        el(
+          "div",
+          { class: "acts" },
+          el(
+            "button",
+            { type: "button", class: "act", on: { click: () => setMode("idle") } },
+            "Not yet",
+          ),
+          el(
+            "button",
+            {
+              type: "button",
+              class: "act",
+              id: "confirm-revert",
+              disabled: state.busy,
+              on: { click: () => revertNow(why.value) },
+            },
+            `Take ${many(total, "change")} back`,
+          ),
+        ),
+      );
+    } else if (state.me.approver && lost.hidden) {
+      second.append(
+        el(
+          "div",
+          { class: "acts" },
+          el(
+            "button",
+            { type: "button", class: "act", id: "revert", on: { click: () => setMode("revert") } },
+            "Take this back",
+          ),
+        ),
+      );
+    }
+  } else if (proposal.status === "reverted") {
+    label("Second key, turned, and taken back", true);
+    second.append(
+      el(
+        "p",
+        {},
+        decider ?? written(`${proposal.decidedBy} approved this. `),
+        "It was applied, and has been taken back: every row is as it was before.",
+        proposal.outcome?.reason ? " " : null,
+        proposal.outcome?.reason ? written(proposal.outcome.reason) : null,
+      ),
+    );
   } else if (proposal.status === "rejected") {
     label("Second key, refused", false);
     second.append(
@@ -1012,7 +1083,8 @@ function setMode(mode) {
   const focus = {
     approve: state.rows.length < (state.proposal?.changes ?? 0) ? "count" : "not-yet",
     reject: "reason",
-    idle: "approve",
+    revert: "revert-reason",
+    idle: state.proposal?.status === "applied" ? "revert" : "approve",
   }[mode];
   document.getElementById(focus)?.focus();
 }
@@ -1050,6 +1122,10 @@ async function act(path, body, done) {
 
 const approve = () => act("approve", { hash: state.readHash }, () => "Approved.");
 const reject = (reason) => act("reject", { reason }, () => "Rejected.");
+const revertNow = (reason) =>
+  act("revert", { reason }, (proposal) =>
+    proposal.status === "reverted" ? "Taken back." : `It is still ${proposal.status}.`,
+  );
 const applyNow = () =>
   act("apply", {}, (proposal) =>
     proposal.status === "applied"

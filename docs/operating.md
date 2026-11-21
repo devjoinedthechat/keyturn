@@ -148,6 +148,19 @@ If the database connection is lost, the command says so and exits with 1, and th
 - Both are read when asked for and may be different a moment later. They are no part of what an approval names. What must hold when the change is written belongs in a rule.
 - At most twenty changes are explained. A reason true of the whole proposal, such as holding more rows than a rule lets through, is given once.
 
+## Taking a change back
+
+```bash
+keyturn revert 0f65fb6a --reason "Refunded the wrong order."
+```
+
+- Connect as an approver. The command shows the proposal and asks; `--yes` does not ask.
+- Exit 0 when every row was put back, 1 when a row stood in the way. Then nothing was taken back, and the row is named.
+- A row stands in the way when it has been written to since the change, when a deleted row's key is in use again, or when the table has changed shape or left Keyturn.
+- To take a change back in spite of later work, propose the reverse as an ordinary change: then a person sees what would be written over.
+- Rows a trigger or a cascade wrote elsewhere when the change was applied are not put back.
+- From SQL: `select keyturn.revert('<proposal>', 'why')`.
+
 ## Moving to a later version
 
 Version 0.1 installs into a database that does not have Keyturn, and refuses one that does. To move to a later version, uninstall and install. Proposals and the audit log are removed with it, so record the audit head and export `keyturn.audit` first if the record matters.

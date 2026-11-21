@@ -201,6 +201,17 @@ export async function serveReview(
       await keyturn.reject(id, body.reason === "" ? undefined : body.reason);
     } else if (action === "apply") {
       await keyturn.apply(id);
+    } else if (action === "revert") {
+      if (body.reason !== undefined && typeof body.reason !== "string") {
+        throw new Problem(400, "A reason is text.");
+      }
+      const outcome = await keyturn.revert(id, body.reason === "" ? undefined : body.reason);
+      if (outcome.status !== "reverted") {
+        throw new Problem(
+          409,
+          `Nothing was taken back: ${outcome.reason ?? "a row stood in the way"}.`,
+        );
+      }
     } else {
       throw new Problem(404, "There is nothing here.");
     }

@@ -284,3 +284,22 @@ def test_doctor(connections: dict[str, psycopg.Connection[Any]]) -> None:
         assert failures and all(finding.fix for finding in failures)
     finally:
         connections["owner"].execute("revoke update on accounts from keyturn_agent")
+
+
+def test_taking_an_applied_change_back(connections: dict[str, psycopg.Connection[Any]]) -> None:
+    agent, alice = Keyturn(connections["agent"]), Keyturn(connections["alice"])
+    before = _balance(connections["owner"], 3)
+    made = agent.propose(
+        [{"table": "accounts", "operation": "update", "key": {"id": 3}, "set": {"balance": 1}}]
+    )
+    alice.approve(made.id, made.content_hash)
+    assert agent.apply(made.id).status == "applied"
+
+    with pytest.raises(Refused):
+        agent.revert(made.id)
+    outcome = alice.revert(made.id, "Wrong account.")
+    assert (outcome.status, outcome.changes, outcome.reason) == ("reverted", 1, "Wrong account.")
+    assert _balance(connections["owner"], 3) == before
+    proposal = alice.proposal(made.id)
+    assert proposal is not None and proposal.status == "reverted"
+    assert agent.apply(made.id).status == "reverted"

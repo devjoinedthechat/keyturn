@@ -20,7 +20,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
-Status = Literal["pending", "approved", "rejected", "applied", "stale", "failed"]
+Status = Literal["pending", "approved", "rejected", "applied", "stale", "failed", "reverted"]
 Kind = Literal["string", "number", "boolean", "null", "array", "object", "absent"]
 
 
@@ -39,8 +39,20 @@ class Undecided(Exception):
 
 @dataclass(frozen=True)
 class Outcome:
-    status: Literal["applied", "stale", "failed"]
+    status: Literal["applied", "stale", "failed", "reverted"]
     changes: int | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class Reverted:
+    """What became of taking a proposal back."""
+
+    status: Literal["reverted", "conflict"]
+    #: How many changes were taken back.
+    changes: int | None = None
+    #: The change that stood in the way, and why.
+    change: int | None = None
     reason: str | None = None
 
 
@@ -199,8 +211,8 @@ class Keyturn:
         """The rows a proposal would change, before and after, ``count`` rows from ``start``."""
         rows = self._run(
             """select seq, relation, operation,
-                      (select jsonb_object_agg(part.key, part.value #>> '{}')
-                         from jsonb_each(d.key) as part) as key,
+                      coalesce((select jsonb_object_agg(part.key, part.value #>> '{}')
+                                  from jsonb_each(d.key) as part), '{}') as key,
                       column_name, before, after, before_kind, after_kind, changed
                  from keyturn.diff(%s, %s, %s) as d""",
             (proposal_id, start, count),
@@ -244,6 +256,21 @@ class Keyturn:
         if outcome is None:  # pragma: no cover - apply always gives an outcome
             raise Refused("apply gave no outcome", None)
         return outcome
+
+    def revert(self, proposal_id: str, reason: str | None = None) -> Reverted:
+        """Takes an applied proposal back: every row it wrote is put as it was before.
+
+        For an approver. ``conflict`` means a row has been written to since, and nothing
+        was taken back.
+        """
+        rows = self._run("select keyturn.revert(%s, %s) as outcome", (proposal_id, reason))
+        outcome = rows[0]["outcome"]
+        return Reverted(
+            status=outcome["status"],
+            changes=outcome.get("changes"),
+            change=outcome.get("change"),
+            reason=outcome.get("reason"),
+        )
 
     def decision(
         self, proposal_id: str, *, timeout: float | None = None, every: float = 1.0

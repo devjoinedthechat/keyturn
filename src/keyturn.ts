@@ -13,7 +13,14 @@ export type Change =
     }
   | { table: string; operation: "delete"; key: Record<string, unknown> };
 
-export type Status = "pending" | "approved" | "rejected" | "applied" | "stale" | "failed";
+export type Status =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "applied"
+  | "stale"
+  | "failed"
+  | "reverted";
 
 export interface Proposal {
   id: string;
@@ -33,9 +40,20 @@ export interface Proposal {
 }
 
 export interface Outcome {
-  status: "applied" | "stale" | "failed";
+  /** `reverted`: it was applied, and an approver has since taken it back. */
+  status: "applied" | "stale" | "failed" | "reverted";
   reason?: string;
   changes?: number;
+}
+
+/** What became of taking a proposal back. */
+export interface Reverted {
+  status: "reverted" | "conflict";
+  /** How many changes were taken back. */
+  changes?: number;
+  /** The change that stood in the way, and why. */
+  change?: number;
+  reason?: string;
 }
 
 /** What a value is. `absent` when the row does not exist on that side, or the column was not given. */
@@ -93,7 +111,15 @@ export interface Waiting {
 }
 
 export interface Step {
-  event: "opened" | "approved" | "approved_by_rule" | "rejected" | "applied" | "stale" | "failed";
+  event:
+    | "opened"
+    | "approved"
+    | "approved_by_rule"
+    | "rejected"
+    | "applied"
+    | "stale"
+    | "failed"
+    | "reverted";
   /** The login that did it. */
   actor: string;
   at: Date;
@@ -294,6 +320,18 @@ export class Keyturn {
   async apply(id: string): Promise<Outcome> {
     const rows = await this.run<{ outcome: Outcome }>("select keyturn.apply($1) as outcome", [id]);
     return (rows[0] as { outcome: Outcome }).outcome;
+  }
+
+  /**
+   * Takes an applied proposal back: every row it wrote is put as it was before. For an
+   * approver. `conflict` means a row has been written to since, and nothing was taken back.
+   */
+  async revert(id: string, reason?: string): Promise<Reverted> {
+    const rows = await this.run<{ outcome: Reverted }>("select keyturn.revert($1, $2) as outcome", [
+      id,
+      reason ?? null,
+    ]);
+    return (rows[0] as { outcome: Reverted }).outcome;
   }
 
   /**

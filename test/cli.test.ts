@@ -474,3 +474,49 @@ describe("what a decision rests on, from the terminal", () => {
     await new Keyturn(await database.as(logins.alice)).reject(made.id);
   });
 });
+
+describe("taking a change back, from the terminal", () => {
+  test("asks first, puts the rows back, and says when a row stands in the way", async () => {
+    const proposer = new Keyturn(await database.as(logins.agent));
+    const approver = new Keyturn(await database.as(logins.alice));
+    const make = async (id: number) => {
+      const made = await proposer.propose([
+        { table: "orders", operation: "update", key: { id }, set: { status: "held" } },
+      ]);
+      const proposal = await approver.proposal(made.id);
+      await approver.approve(made.id, proposal?.contentHash ?? "");
+      await proposer.apply(made.id);
+      return made.id;
+    };
+
+    const first = await make(150);
+    // Nobody at the terminal, and no --yes: nothing is done.
+    expect((await keyturn(logins.alice, ["revert", first])).err).toContain("--yes");
+    // Somebody there who thinks again.
+    const left = await keyturn(logins.alice, ["revert", first], ["no"]);
+    expect(left).toMatchObject({ code: 1 });
+    expect(left.out).toContain("Left as it was.");
+    expect((await order(150)).status).toBe("held");
+    // An agent may not.
+    expect((await keyturn(logins.agent, ["revert", first, "--yes"])).code).toBe(1);
+    expect((await order(150)).status).toBe("held");
+
+    const done = await keyturn(
+      logins.alice,
+      ["revert", first, "--reason", "Wrong order."],
+      ["revert"],
+    );
+    expect(done.code).toBe(0);
+    expect(done.asked[0]).toContain('Type "revert"');
+    expect(done.out).toContain("Taken back: 1 row put as it was.");
+    expect((await order(150)).status).toBe("paid");
+    expect((await keyturn(logins.alice, ["list", "--all"])).out).toContain("reverted");
+
+    const second = await make(151);
+    await owner.query("update orders set total = 1 where id = 151");
+    const blocked = await keyturn(logins.alice, ["revert", second, "--yes"]);
+    expect(blocked.code).toBe(1);
+    expect(blocked.out).toContain("Nothing was taken back: the row");
+    expect((await order(151)).status).toBe("held");
+  });
+});
