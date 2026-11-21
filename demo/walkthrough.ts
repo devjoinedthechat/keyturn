@@ -14,7 +14,10 @@ import { chromium, type Page } from "playwright";
 import { install, Keyturn, protect, serveReview } from "../src/index.ts";
 
 const OUT = process.argv[2] ?? "docs/walkthrough/keyturn-walkthrough.svg";
-const SIZE = { width: 860, height: 600 };
+/** The picture as the README shows it, and the browser window it is taken from: the whole
+ *  review page at a desk's width, drawn smaller, so nothing reads as zoomed in. */
+const SIZE = { width: 860, height: 550 };
+const WINDOW = { width: 1376, height: 880 };
 /** Seconds each still is shown, and how long one fades into the next. */
 const HOLD = 6;
 const FADE = 0.5;
@@ -93,8 +96,9 @@ async function agentProposes(note: string, sql: string): Promise<string> {
 const browser = await chromium.launch();
 try {
   const context = await browser.newContext({
-    viewport: SIZE,
-    deviceScaleFactor: 2,
+    viewport: WINDOW,
+    // Twice the README's width once drawn at it, so the text stays sharp.
+    deviceScaleFactor: (SIZE.width * 2) / WINDOW.width,
     // Fixed, so that a still shows nothing about the machine it was made on.
     timezoneId: "UTC",
     locale: "en-US",
