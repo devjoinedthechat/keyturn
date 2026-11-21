@@ -79,7 +79,7 @@ export async function install(db: Queryable): Promise<{ version: string }> {
 }
 
 /** What Keyturn keeps: carried over, row for row, when it moves to a later version. */
-const kept = ["proposals", "changes", "audit", "rules", "forbidden"] as const;
+const kept = ["proposals", "changes", "audit", "rules", "forbidden", "archived"] as const;
 
 /** Whether one version comes after another: 0.10.0 after 0.9.2. */
 function later(one: string, other: string): boolean {

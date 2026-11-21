@@ -1,11 +1,13 @@
 import type { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import pg from "pg";
+import { prune, verifyArchive, writeArchive } from "./archive.ts";
 import { install, installed, protect, uninstall, unprotect, upgrade, version } from "./install.ts";
 import { Keyturn, type Queryable, Refused } from "./keyturn.ts";
 import { json, plain, renderFindings, renderList, renderProposal, type Style } from "./render.ts";
 import { serveReview } from "./review.ts";
 import { serveTools, unfitForAgent } from "./tools.ts";
+import { line, post, watch } from "./watch.ts";
 
 const usage = `keyturn: PostgreSQL refuses an agent's write until a person approved that exact change.
 
@@ -15,6 +17,10 @@ For the tables' owner
   keyturn protect <table>         Put a table under keyturn. --loose lets the table's own triggers alter applied rows
   keyturn unprotect <table>       Take a table out again
   keyturn doctor                  Check that an agent has no way round. Exit 1 if it has
+  keyturn archive --before <date> --out <file>
+                                  Write every finished proposal from before a date to a file, check the file,
+                                  and take them out of the database. --keep writes and checks, and removes nothing
+  keyturn verify-archive <file>   Check that an archive file holds together. Needs no database
   keyturn uninstall --yes         Remove keyturn, its proposals and its audit log
 
 For an approver
@@ -26,6 +32,8 @@ For an approver
   keyturn apply <proposal>        Write an approved proposal's changes
   keyturn revert <proposal>       Take an applied proposal back: every row as it was before. --yes does not ask
   keyturn verify-audit            Check the audit log holds together. Exit 1 if it does not
+  keyturn watch                   Say when a proposal is made or decided, as it happens. --webhook <url> sends
+                                  each as JSON, --slack <url> as a line of text to a Slack incoming webhook
 
 For an agent
   keyturn tools                   Serve propose, check and apply as tools over the Model Context Protocol,
@@ -66,6 +74,8 @@ export interface Io {
 /** A database connection as a command uses it. */
 export interface Link extends Queryable {
   end(): Promise<void>;
+  /** Hands on what the database says aloud on a channel this connection listens to. */
+  heard?(listener: (channel: string, payload: string) => void): void;
   /** Rejects when the connection is lost. Absent when the connection cannot say. */
   lost?: Promise<never>;
 }
@@ -74,6 +84,8 @@ export interface Link extends Queryable {
 const commands: Record<string, string | null> = {
   install: null,
   upgrade: null,
+  archive: null,
+  "verify-archive": "a file",
   uninstall: null,
   protect: "a table",
   unprotect: "a table",
@@ -85,6 +97,7 @@ const commands: Record<string, string | null> = {
   apply: "a proposal",
   revert: "a proposal",
   review: null,
+  watch: null,
   tools: null,
   "verify-audit": null,
 };
@@ -122,6 +135,22 @@ export async function run(argv: string[], io: Io): Promise<number> {
   if (wanted !== null && wanted !== undefined && target === undefined) {
     io.err(`keyturn ${command} needs ${wanted}.\n\nkeyturn help lists the commands.`);
     return 2;
+  }
+
+  // A file is checked against itself, with no database in it.
+  if (command === "verify-archive") {
+    try {
+      const head = await verifyArchive(target as string);
+      io.out(
+        values.json
+          ? json(head)
+          : `The archive holds together: ${head.proposals.toLocaleString("en")} proposals, ${head.entries.toLocaleString("en")} entries, from before ${head.before}.\ndigest ${head.digest}\nfile   ${head.file}`,
+      );
+      return 0;
+    } catch (error) {
+      io.err(`Refused: ${plain(error instanceof Error ? error.message : String(error))}`);
+      return 1;
+    }
   }
 
   const url = values.url ?? io.env.KEYTURN_URL ?? io.env.DATABASE_URL;
@@ -191,6 +220,35 @@ export async function run(argv: string[], io: Io): Promise<number> {
         print(
           moved,
           `Moved keyturn from ${moved.from} to ${moved.to}. Every proposal, rule and audit entry was kept.\nNext: keyturn doctor`,
+        );
+        return 0;
+      }
+      case "archive": {
+        if (values.before === undefined || values.out === undefined) {
+          throw new Usage("keyturn archive needs --before <date> and --out <file>.");
+        }
+        const before = new Date(values.before);
+        if (Number.isNaN(before.getTime())) {
+          throw new Usage("--before takes a date, such as 2026-01-01 or 2026-01-01T00:00:00Z.");
+        }
+        if (before.getTime() > Date.now()) {
+          throw new Usage("--before takes a date that has passed.");
+        }
+        const written = await writeArchive(db, before, values.out);
+        // Read back from the disk and held against itself before anything is removed on its word.
+        await verifyArchive(values.out);
+        const size = `${written.proposals.toLocaleString("en")} finished proposal${written.proposals === 1 ? "" : "s"}, ${written.entries.toLocaleString("en")} entries`;
+        if (values.keep) {
+          print(
+            { ...written, removed: false },
+            `Wrote ${size} to ${values.out}. Nothing was removed.\ndigest ${written.digest}\nfile   ${written.file}`,
+          );
+          return 0;
+        }
+        const done = await prune(db, before, written);
+        print(
+          { ...written, removed: true, headBefore: done.head_before, headAfter: done.head_after },
+          `Wrote ${size} to ${values.out}, and took them out of the database.\ndigest ${written.digest}\nfile   ${written.file}\nhead   ${done.head_after}\nKeep the file, and these three values, somewhere this database's owner cannot reach.`,
         );
         return 0;
       }
@@ -317,6 +375,52 @@ export async function run(argv: string[], io: Io): Promise<number> {
         );
         return outcome.status === "reverted" ? 0 : 1;
       }
+      case "watch": {
+        for (const [name, url] of [
+          ["--webhook", values.webhook],
+          ["--slack", values.slack],
+        ] as const) {
+          if (url !== undefined && !/^https?:\/\/[^\s]+$/.test(url)) {
+            throw new Usage(`${name} takes an address that starts with http:// or https://.`);
+          }
+        }
+        const heard = db.heard;
+        if (heard === undefined) {
+          throw new Refused("this connection cannot be listened on", null);
+        }
+        const failed = (to: string) => (error: unknown) =>
+          io.err(`watch: ${to}: ${plain(error instanceof Error ? error.message : String(error))}`);
+        await watch(
+          { query: (text, given) => db.query(text, given), heard },
+          async (told) => {
+            io.out(values.json ? json(told) : line(told));
+            // Sent one after the other, and a failure of one does not stop the other.
+            if (values.webhook !== undefined) {
+              await post(values.webhook, told).catch(failed("the webhook"));
+            }
+            if (values.slack !== undefined) {
+              await post(values.slack, { text: `keyturn: ${line(told)}` }).catch(failed("Slack"));
+            }
+          },
+          failed("a proposal could not be read"),
+        );
+        const waiting = await keyturn.waiting();
+        io.err(
+          `Watching. ${waiting.length === 0 ? "Nothing is" : waiting.length === 1 ? "One proposal is" : `${waiting.length} proposals are`} waiting now. Ctrl-C stops.`,
+        );
+        try {
+          await Promise.race([
+            (io.until ?? interrupted)(),
+            db.lost ?? new Promise<never>(() => {}),
+          ]);
+        } catch {
+          io.err(
+            "The connection to the database was lost. Start it again: what happened meanwhile is not told.",
+          );
+          return 1;
+        }
+        return 0;
+      }
       case "review": {
         const port = values.port === undefined ? undefined : Number(values.port);
         if (port !== undefined && !(Number.isInteger(port) && port >= 0 && port < 65536)) {
@@ -418,6 +522,11 @@ function parse(argv: string[]) {
     options: {
       url: { type: "string" },
       port: { type: "string" },
+      webhook: { type: "string" },
+      before: { type: "string" },
+      out: { type: "string" },
+      keep: { type: "boolean" },
+      slack: { type: "string" },
       hash: { type: "string" },
       reason: { type: "string" },
       rows: { type: "string" },
@@ -478,6 +587,9 @@ async function connect(url: string | undefined): Promise<Link> {
       return next;
     },
     end: () => client.end(),
+    heard: (listener) => {
+      client.on("notification", (said) => listener(said.channel, said.payload ?? ""));
+    },
     lost,
   };
 }

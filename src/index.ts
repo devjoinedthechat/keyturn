@@ -1,3 +1,4 @@
+export { type Archive, type ArchiveHead, prune, verifyArchive, writeArchive } from "./archive.ts";
 export {
   install,
   installed,
@@ -30,3 +31,4 @@ export {
 } from "./keyturn.ts";
 export { type Review, serveReview } from "./review.ts";
 export { serveTools } from "./tools.ts";
+export { type Hearing, line, type Told, watch } from "./watch.ts";

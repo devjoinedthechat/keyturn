@@ -130,13 +130,42 @@ select keyturn.forbid(
 
 - `keyturn verify-audit` exits with 1 if the log does not hold together.
 - Record the head value it prints somewhere the database's owner cannot reach, on a schedule. A later head for the same entry count that differs means the log was rewritten.
-- Entries are never deleted, so the log grows with use. Keyturn has no pruning.
+- Entries are never changed. The log grows with use, and old records are put away with `keyturn archive`, below.
+
+### Putting old records away
+
+```bash
+keyturn archive --before 2026-01-01 --out keyturn-2025.jsonl
+keyturn verify-archive keyturn-2025.jsonl
+```
+
+- Connect as the owner. Every finished proposal whose last entry was before the date is written to the file, the file is read back and checked, and those proposals are then taken out of the database with their rows and their entries. `--keep` writes and checks, and removes nothing.
+- A proposal is finished when it was rejected, applied, taken back, found stale or failed, or was never decided and has expired. One that is waiting, or approved and not yet applied, stays.
+- Nothing is removed that the file does not hold: the removal is given the digest of what was written, and refuses if what it would remove has any other.
+- A mark stays in `keyturn.archived`: when, by whom, how many, the digest, the hash of the file, and the value of the whole log before and after. `keyturn verify-audit` holds for what is left.
+- `keyturn verify-archive` needs no database. It reports a line altered, added, removed or moved; an entry changed; rows that are not the rows an approval named; a file cut short.
+- The file's own hash is what tells an altered file from the one that was written, so keep it apart from the file. The command prints it, and the mark has it.
+- A file is never written over. It is made readable by its owner only.
 
 ## The review page
 
 `keyturn review` serves a page on 127.0.0.1 and prints its address, which carries a key made for that run. It uses the connection it was started with, so start it as the approver. To use it from another machine, forward the port over SSH; it does not listen on other addresses.
 
 If the database connection is lost, the command says so and exits with 1, and the page tells the reviewer it has lost contact. Start it again. `keyturn tools` does the same, so that whatever runs it can restart it.
+
+## Knowing when a proposal is waiting
+
+```bash
+keyturn watch --slack https://hooks.slack.com/services/T000/B000/XXXX
+keyturn watch --webhook https://example.org/keyturn --json
+```
+
+- Connect as an approver and leave it running. It prints a line for each proposal that is made, decided, applied or taken back, as it happens.
+- `--slack` sends that line to a Slack incoming webhook. `--webhook` sends the same as JSON by POST: the event, the proposal's id and state, who made and decided it, its note, and how many rows of which tables. Both may be given.
+- Nothing a row holds is sent. The note is sent, and the note is the agent's own words.
+- An address that refuses or does not answer in ten seconds is reported and does not stop the watching.
+- What happened while it was not running is not told afterwards. `keyturn list` shows what is waiting.
+- Underneath, Keyturn says each step on the PostgreSQL channel `keyturn`, as `{"event": "opened", "proposal": "<id>"}`, when the step's transaction is kept. Your own program can `LISTEN keyturn` in place of this command. Any login of the database may listen, and learns that much and no more.
 
 ## What the approver is shown beside the rows
 

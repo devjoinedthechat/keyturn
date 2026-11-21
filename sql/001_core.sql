@@ -161,6 +161,11 @@ begin
   insert into keyturn.audit (proposal_id, at, event, detail, prev_hash, hash)
     values (p_proposal, moment, p_event, coalesce(p_detail, '{}'), previous,
             keyturn.audit_hash(previous, p_proposal, moment, session_user, p_event, coalesce(p_detail, '{}')));
+  -- Said aloud as well, to whoever is listening on the channel "keyturn", once the
+  -- transaction is kept: a proposal should not wait for somebody to think of looking. It
+  -- says which proposal and what happened, and nothing of what the proposal holds. Any login
+  -- of the database may listen.
+  perform pg_notify('keyturn', jsonb_build_object('event', p_event, 'proposal', p_proposal)::text);
 end $$;
 
 -- Rules for changes that need no person. There are none unless the tables' owner writes
@@ -686,18 +691,23 @@ end $$;
 
 -- The hash of a proposal's content: every change, in order, with the note. jsonb writes its
 -- keys in one order and its numbers one way, so the same content always gives the same text.
-create function keyturn.hash_of(p_proposal_id uuid) returns text
+create function keyturn.content_of(p_proposal_id uuid) returns text
   language sql stable
   set search_path = pg_catalog, pg_temp
   as $$
-    select encode(sha256(convert_to(jsonb_build_object(
+    select jsonb_build_object(
              'note', (select note from keyturn.proposals where id = p_proposal_id),
              'changes', jsonb_agg(jsonb_build_object(
                'table', relation_name, 'shape', shape, 'operation', operation,
-               'key', key, 'before', before, 'after', after, 'columns', columns) order by seq))::text, 'UTF8')), 'hex')
+               'key', key, 'before', before, 'after', after, 'columns', columns) order by seq))::text
       from keyturn.changes
      where proposal_id = p_proposal_id
   $$;
+
+create function keyturn.hash_of(p_proposal_id uuid) returns text
+  language sql stable
+  set search_path = pg_catalog, pg_temp
+  as $$ select encode(sha256(convert_to(keyturn.content_of(p_proposal_id), 'UTF8')), 'hex') $$;
 
 -- ---------------------------------------------------------------- deciding
 
@@ -1125,4 +1135,4 @@ grant execute on function keyturn.propose(jsonb, text, interval), keyturn.record
 grant execute on function keyturn.apply(uuid) to keyturn_agent, keyturn_approver;
 grant execute on function keyturn.approve(uuid, text), keyturn.reject(uuid, text) to keyturn_approver;
 grant execute on function keyturn.verify_audit(), keyturn.audit_head(), keyturn.audit_hash(text, uuid, timestamptz, name, text, jsonb) to keyturn_approver;
-grant execute on function keyturn.hash_of(uuid), keyturn.caller_is(name), keyturn.shape_of(regclass), keyturn.key_condition(regclass, text[]), keyturn.image(text[]) to keyturn_agent, keyturn_approver;
+grant execute on function keyturn.content_of(uuid), keyturn.hash_of(uuid), keyturn.caller_is(name), keyturn.shape_of(regclass), keyturn.key_condition(regclass, text[]), keyturn.image(text[]) to keyturn_agent, keyturn_approver;
