@@ -232,6 +232,17 @@ function when(moment, future) {
 
 const many = (count, word) => `${count.toLocaleString("en")} ${word}${count === 1 ? "" : "s"}`;
 const standing = (proposal) => (proposal.expired ? "expired" : proposal.status);
+/** A proposal's state in the list, in the words a reader would use. */
+const stateWords = {
+  pending: "waiting",
+  approved: "to apply",
+  applied: "applied",
+  rejected: "rejected",
+  reverted: "taken back",
+  stale: "stale",
+  failed: "failed",
+  expired: "expired",
+};
 
 // ---------------------------------------------------------------- the queue
 
@@ -274,7 +285,14 @@ function drawQueue() {
         "aria-current": proposal.id === state.id ? "true" : null,
         on: { click: () => open(proposal.id) },
       },
-      el("span", { class: "size" }, many(proposal.changes, "row")),
+      el(
+        "span",
+        { class: "head" },
+        el("span", { class: "size" }, many(proposal.changes, "row")),
+        state.view === "decided" || proposal.expired
+          ? el("span", { class: `state ${standing(proposal)}` }, stateWords[standing(proposal)])
+          : null,
+      ),
       parts,
       el(
         "span",
@@ -282,7 +300,6 @@ function drawQueue() {
         written(proposal.proposedBy),
         ", ",
         when(proposal.proposedAt, false),
-        state.view === "decided" ? `, ${standing(proposal)}` : "",
       ),
       proposal.note === ""
         ? null
@@ -298,7 +315,29 @@ function drawQueue() {
       ),
     );
   }
+  // How to get about without the mouse, said once, where the eye ends up.
+  if (state.list.length > 1) {
+    items.push(
+      el("p", { class: "hint" }, el("kbd", {}, "j"), " ", el("kbd", {}, "k"), " next and previous"),
+    );
+  }
   queue.replaceChildren(...items);
+  const waiting = state.view === "waiting" ? state.list.length : null;
+  if (state.me !== null && waiting !== null) {
+    document.title = `${waiting > 0 ? `(${waiting}) ` : ""}keyturn review: ${state.me.database}`;
+  }
+}
+
+/** The proposal after the open one in the list, or before it; the first when the open one is not listed. */
+function neighbour(step) {
+  if (state.list.length === 0) {
+    return null;
+  }
+  const at = state.list.findIndex((proposal) => proposal.id === state.id);
+  if (at === -1) {
+    return state.list[0].id;
+  }
+  return state.list[at + step]?.id ?? null;
 }
 
 async function loadList() {
@@ -362,7 +401,7 @@ function drawSheet() {
     parts.push(
       el(
         "p",
-        { class: "banner" },
+        { class: "banner taken-back" },
         "This change was applied and has been taken back: every row is as it was before.",
         proposal.outcome?.reason ? " " : null,
         proposal.outcome?.reason ? written(proposal.outcome.reason) : null,
@@ -423,7 +462,12 @@ function drawSheet() {
           el(
             "li",
             {},
-            el("b", {}, step.event === "approved_by_rule" ? "let through by a rule" : step.event),
+            el(
+              "b",
+              {},
+              { approved_by_rule: "let through by a rule", reverted: "taken back" }[step.event] ??
+                step.event,
+            ),
             " by ",
             written(
               step.event === "approved_by_rule"
@@ -547,7 +591,15 @@ function drawPointsTo(seqs) {
         "Points to ",
         el("b", {}, written(table)),
         " ",
-        el("span", { class: "chip" }, "as it is now, and no part of what is approved"),
+        el(
+          "span",
+          {
+            class: "chip",
+            title:
+              "Read when this page asked, with your own rights. It may be different a moment later, and an approval does not cover it.",
+          },
+          "as it is now, and no part of what is approved",
+        ),
       ),
       el(
         "div",
@@ -664,7 +716,7 @@ function drawUpdate(row) {
       " update ",
       keyParts(row.key),
     ),
-    el("table", { class: "pairs" }, body),
+    el("div", { class: "scroll" }, el("table", { class: "pairs" }, body)),
     same.length === 0
       ? null
       : el(
@@ -1040,9 +1092,7 @@ function drawKeys() {
         "p",
         {},
         decider ?? written(`${proposal.decidedBy} approved this. `),
-        "It was applied, and has been taken back: every row is as it was before.",
-        proposal.outcome?.reason ? " " : null,
-        proposal.outcome?.reason ? written(proposal.outcome.reason) : null,
+        "It was applied, and has been taken back.",
       ),
     );
   } else if (proposal.status === "rejected") {
@@ -1071,6 +1121,22 @@ function drawKeys() {
     second.append(
       el("p", { class: "refused", role: "alert" }, "Refused: ", written(state.refused)),
     );
+  }
+  // Once this one is decided, the way on to the next is here, where the hand already is.
+  const onward = state.view === "waiting" && proposal.status !== "pending" ? neighbour(1) : null;
+  if (onward !== null && state.mode === "idle") {
+    const next = el(
+      "button",
+      { type: "button", class: "act", id: "next", on: { click: () => open(onward) } },
+      state.list.length === 1 ? "The one still waiting" : `Next of ${state.list.length} waiting`,
+    );
+    // Beside what is already offered here, not on a line of its own.
+    const acts = second.querySelector(".acts");
+    if (acts === null) {
+      second.append(el("div", { class: "acts" }, next));
+    } else {
+      acts.append(next);
+    }
   }
   keys.replaceChildren(first, second);
 }
@@ -1118,6 +1184,10 @@ async function act(path, body, done) {
     drawKeys();
   }
   await loadList().catch(() => {});
+  // The list now says what else is waiting, which the bar offers to go on to.
+  if (state.id === id) {
+    drawKeys();
+  }
 }
 
 const approve = () => act("approve", { hash: state.readHash }, () => "Approved.");
@@ -1271,6 +1341,10 @@ async function start() {
     document.getElementById(`view-${view}`).addEventListener("click", () => {
       state.view = view;
       drawQueue();
+      // What the bar offers depends on which list is open.
+      if (state.proposal !== null) {
+        drawKeys();
+      }
       loadList().catch(() => {});
     });
   }
@@ -1303,5 +1377,27 @@ async function start() {
   };
   setTimeout(again, 4000);
 }
+
+// Moving through the list from the keyboard. Nothing is decided by a single key.
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) {
+    return;
+  }
+  if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select")) {
+    return;
+  }
+  if (state.mode !== "idle" || state.busy) {
+    return;
+  }
+  const step = { j: 1, k: -1 }[event.key];
+  if (step === undefined) {
+    return;
+  }
+  const id = neighbour(step);
+  if (id !== null) {
+    event.preventDefault();
+    open(id);
+  }
+});
 
 start();

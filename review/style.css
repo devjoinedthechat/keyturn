@@ -76,8 +76,21 @@ button {
 
 .mark {
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font: 600 15px var(--mono);
   letter-spacing: 0.02em;
+}
+
+.mark svg {
+  flex: none;
+  /* The baseline of the word, not the middle of the line, is where a mark sits. */
+  translate: 0 -1px;
+}
+
+.mark .turn {
+  stroke: var(--brass);
 }
 
 .who {
@@ -100,9 +113,22 @@ button {
   border-bottom: 2px solid transparent;
 }
 
+.views button:hover {
+  color: var(--ink);
+}
+
 .views button[aria-pressed="true"] {
   color: var(--ink);
   border-bottom-color: var(--brass);
+}
+
+#count-waiting {
+  font: 600 13px var(--mono);
+}
+
+::selection {
+  background: var(--brass-wash);
+  color: var(--ink);
 }
 
 .lost {
@@ -143,13 +169,66 @@ button {
   padding: 12px 20px 12px 24px;
 }
 
+.queue button:hover {
+  background: color-mix(in srgb, var(--sheet) 55%, transparent);
+}
+
 .queue button[aria-current="true"] {
   background: var(--sheet);
 }
 
+.queue .head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .queue .size {
   font: 600 17px var(--mono);
-  display: block;
+}
+
+/* What became of it, where the eye can run down the list and find the one that went wrong. */
+.queue .state {
+  flex: none;
+  font: 600 11px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--soft);
+}
+
+.queue .state.applied {
+  color: var(--came);
+}
+
+.queue .state.rejected,
+.queue .state.failed {
+  color: var(--gone);
+}
+
+.queue .state.reverted,
+.queue .state.approved {
+  color: var(--brass);
+}
+
+.queue .hint {
+  margin: 0;
+  padding: 16px 24px 8px;
+  color: var(--soft);
+  font-size: 12px;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 4px;
+  font: 11px / 1.6 var(--mono);
+  text-align: center;
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  border-radius: 4px;
 }
 
 .queue .parts,
@@ -247,6 +326,11 @@ button {
   background: var(--gone-wash);
 }
 
+/* Taken back is a decision, not a fault. */
+.banner.taken-back {
+  background: var(--brass-wash);
+}
+
 .waits {
   margin: 0 0 24px;
   padding: 10px 14px;
@@ -336,6 +420,12 @@ th {
   max-width: 44ch;
 }
 
+/* A value keeps room for a figure. On a narrow screen the table scrolls; "25.00" is never cut in two. */
+.pairs .was,
+.pairs .now {
+  min-width: 11ch;
+}
+
 .pairs .was {
   color: var(--gone);
   background: var(--gone-wash);
@@ -363,6 +453,10 @@ th {
   margin: 0 0 18px;
 }
 
+.change .scroll {
+  margin-bottom: 4px;
+}
+
 .grid th {
   color: var(--soft);
   border-bottom: 1px solid var(--rule);
@@ -371,8 +465,14 @@ th {
 
 .grid td {
   max-width: 36ch;
+  min-width: 7ch;
   overflow-wrap: anywhere;
   border-bottom: 1px solid var(--faint);
+}
+
+.grid td.seq,
+.grid td.sign {
+  min-width: 0;
 }
 
 .grid .sign {
@@ -499,6 +599,22 @@ button:disabled {
   color: var(--brass);
 }
 
+/* A key: hollow until it is turned. Two of them, side by side, are the whole state of a proposal. */
+.key .label::before {
+  content: "";
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 8px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  vertical-align: -1px;
+}
+
+.key .label.turned::before {
+  background: currentColor;
+}
+
 .key p {
   margin: 0;
 }
@@ -524,11 +640,19 @@ button:disabled {
   background: var(--sheet);
 }
 
+.act:hover:not(:disabled) {
+  border-color: var(--soft);
+}
+
 .act.turn {
   background: var(--brass);
   border-color: var(--brass);
   color: var(--brass-ink);
   font-weight: 600;
+}
+
+.act.turn:hover:not(:disabled) {
+  border-color: var(--ink);
 }
 
 .act:disabled {
@@ -586,7 +710,18 @@ button:disabled {
   .queue {
     border-right: 0;
     border-bottom: 1px solid var(--rule);
-    max-height: 38vh;
+    max-height: 30vh;
+  }
+
+  .queue .hint {
+    display: none;
+  }
+
+  /* The bar stays on the screen here, so it is kept short: the hash on one line. */
+  .key .hash {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .sheet {

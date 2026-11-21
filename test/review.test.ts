@@ -845,3 +845,77 @@ describe("taking a change back, on the page", () => {
     await page.context().close();
   });
 });
+
+describe("getting about the page", () => {
+  test("the list says what became of each proposal, and the tab says how many are waiting", async () => {
+    const made = await agent.propose([refund(330)], { note: "Refund order 330, to be rejected." });
+    await new Keyturn(await database.as(logins.bob)).reject(made.id, "Not this one.");
+    await agent.propose([refund(331)], { note: "Refund order 331, waiting." });
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await expect.poll(() => page.title(), { timeout: 10_000 }).toMatch(/^\(\d+\) keyturn review: /);
+    const waiting = Number((await page.title()).match(/^\((\d+)\)/)?.[1]);
+    expect(await page.locator("#count-waiting").innerText()).toBe(String(waiting));
+
+    await page.locator("#view-decided").click();
+    const row = page.locator(".queue button", { hasText: "to be rejected" });
+    await expect.poll(() => row.count(), { timeout: 10_000 }).toBe(1);
+    expect(await row.locator(".state").innerText()).toMatch(/rejected/i);
+    expect(
+      await page.locator(".queue button", { hasText: "wrongly" }).locator(".state").innerText(),
+    ).toMatch(/taken back/i);
+    const found = await new AxeBuilder({ page }).analyze();
+    expect(found.violations.map((violation) => violation.id)).toEqual([]);
+    await page.context().close();
+  });
+
+  test("j and k move through the list, and never while something is being decided or typed", async () => {
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await expect
+      .poll(() => page.locator(".queue button").count(), { timeout: 10_000 })
+      .toBeGreaterThan(1);
+    const current = () =>
+      page.evaluate(
+        "[...document.querySelectorAll('.queue button')].findIndex((each) => each.getAttribute('aria-current') === 'true')",
+      );
+    await expect.poll(current, { timeout: 10_000 }).toBe(0);
+    await page.keyboard.press("j");
+    await expect.poll(current).toBe(1);
+    await page.keyboard.press("k");
+    await expect.poll(current).toBe(0);
+    // At the top there is nothing before the first.
+    await page.keyboard.press("k");
+    await page.waitForTimeout(200);
+    expect(await current()).toBe(0);
+
+    // While a reason is being typed, the letters are letters.
+    await expect.poll(() => page.locator("#reject").count(), { timeout: 10_000 }).toBe(1);
+    await page.locator("#reject").click();
+    await page.locator("#reason").fill("");
+    await page.keyboard.type("jk");
+    expect(await page.locator("#reason").inputValue()).toBe("jk");
+    expect(await current()).toBe(0);
+    await page.context().close();
+  });
+
+  test("once one is decided, the way on to the next waiting is beside it", async () => {
+    await agent.propose([refund(332)], { note: "Refund order 332, first of two." });
+    await agent.propose([refund(333)], { note: "Refund order 333, second of two." });
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.locator(".queue button", { hasText: "first of two" }).click();
+    expect(await page.locator("#next").count()).toBe(0);
+    await page.locator("#reject").click();
+    await page.locator("#confirm-reject").click();
+    await expect.poll(() => page.locator("#next").count(), { timeout: 10_000 }).toBe(1);
+    expect(await page.locator("#next").innerText()).toMatch(/waiting/);
+    await page.locator("#next").click();
+    await expect.poll(() => page.locator("#approve").count(), { timeout: 10_000 }).toBe(1);
+    expect(await page.locator(".queue button[aria-current='true']").count()).toBe(1);
+    // In the list of what is decided there is no next to go on to.
+    await page.locator("#view-decided").click();
+    expect(await page.locator("#next").count()).toBe(0);
+    await page.context().close();
+  });
+});
