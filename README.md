@@ -297,6 +297,7 @@ The time that matters is the person's. Keyturn is for changes worth a person's l
 - **A login may have 200 proposals waiting.** More are refused until some are decided or expire, so the party under review cannot bury the queue.
 - **Version 0.1 installs into a database that does not have Keyturn.** Moving to a later version means `keyturn uninstall` and `keyturn install`, which removes proposals and the audit log.
 - **The agent does not see its proposed change when it reads again.** Nothing is written until apply.
+- **A proposal is applied in a read committed transaction.** That is PostgreSQL's default. In a transaction that keeps one view of the data, apply is refused.
 - **A view holds on to its table's columns.** Before dropping or retyping a column, run `select keyturn.drop_view('orders')`, then `select keyturn.protect('orders')` after.
 - **The table's triggers, defaults and cascades run at apply.** A row that comes out different from what was approved fails the apply, unless the table was protected with `--loose`.
 - **Installing needs three roles.** If the installing login may not create roles, `keyturn install` prints the three statements for an administrator.

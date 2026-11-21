@@ -192,6 +192,13 @@ create table keyturn.rules (
 create function keyturn.rules_covering(p_proposal_id uuid) returns jsonb
   language plpgsql stable
   set search_path = pg_catalog, pg_temp
+  -- A condition is SQL, and what SQL means depends on the session: whether a backslash in a
+  -- string is an escape, whether "= null" is read as "is null", how a date is written. Every
+  -- function that works a condition out runs with these settings, whatever the caller's are,
+  -- so that the party a rule restrains cannot change what the rule says.
+  set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
+  set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   as $$
 declare
   change  keyturn.changes;
@@ -235,6 +242,9 @@ create function keyturn.allow(name text, relation regclass, operations text[], c
                               max_rows integer default 1, condition text default null, per_hour integer default 60) returns void
   language plpgsql
   set search_path = pg_catalog, pg_temp
+  set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
+  set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   as $$
 -- The parameters carry the names of the rule's columns, so that a call reads
 -- "max_rows => 5". Inside, a bare name is the column and "allow.name" the parameter.
@@ -292,6 +302,9 @@ create index forbidden_for on keyturn.forbidden (relation) where active;
 create function keyturn.forbidden_by(p_relation regclass, p_operation text, p_before jsonb, p_after jsonb) returns text
   language plpgsql stable
   set search_path = pg_catalog, pg_temp
+  set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
+  set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   as $$
 declare
   rule  keyturn.forbidden;
@@ -314,6 +327,9 @@ end $$;
 create function keyturn.forbid(name text, relation regclass, operations text[], condition text, reason text) returns void
   language plpgsql
   set search_path = pg_catalog, pg_temp
+  set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
+  set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   as $$
 #variable_conflict use_column
 begin
@@ -545,7 +561,10 @@ begin
       -- Passed through the table's own types, so that 1 and "1" and 1.0 are written one way.
       execute format('select to_jsonb(r) from jsonb_to_record($1) as r (%s)', keyturn.columns_as(target.relation, columns)) into after using given;
       key := (select jsonb_object_agg(entry.key, entry.value) from jsonb_each(after) as entry where entry.key = any (target.key_columns));
-      key := coalesce(key, '{}'::jsonb);
+      -- A key the table makes part of is not known yet. Half a key would name the wrong row.
+      if key is null or not (key ?& target.key_columns) then
+        key := '{}'::jsonb;
+      end if;
     else
       key := change -> 'key';
       if jsonb_typeof(key) is distinct from 'object'
@@ -676,6 +695,31 @@ create function keyturn.caller_is(p_group name) returns boolean
   set search_path = pg_catalog, pg_temp
   as $$ select pg_has_role(session_user, p_group, 'MEMBER') $$;
 
+-- Whether any table a proposal touches has a rule that forbids, having first taken this
+-- transaction's turn at each such table. Proposals for one table are thus written one after
+-- the other, and each sees what the one before it wrote.
+--
+-- The turn is an advisory lock, held to the end of the transaction. It is not a lock on the
+-- rules themselves: the owner can always write or switch off a rule, whatever is waiting.
+create function keyturn.hold_forbidden(p_proposal_id uuid) returns boolean
+  language plpgsql
+  set search_path = pg_catalog, pg_temp
+  as $$
+declare
+  held oid;
+  any_ boolean := false;
+begin
+  for held in
+    select distinct f.relation::oid from keyturn.forbidden f
+     where f.active and f.relation in (select c.relation from keyturn.changes c where c.proposal_id = p_proposal_id)
+     order by 1
+  loop
+    perform pg_advisory_xact_lock(hashtext('keyturn.forbidden'), hashtext(held::text));
+    any_ := true;
+  end loop;
+  return any_;
+end $$;
+
 -- The first change of a proposal that a rule forbids, with the rule's name and reason, or null.
 create function keyturn.forbidden_in(p_proposal_id uuid) returns text
   language plpgsql stable
@@ -793,6 +837,7 @@ declare
   covered  jsonb;
   rule     keyturn.rules;
   forbidden text;
+  guarded  boolean;
 begin
   if not (keyturn.caller_is('keyturn_agent') or keyturn.caller_is('keyturn_approver')) then
     raise exception 'keyturn: % may not use keyturn', session_user using errcode = 'insufficient_privilege';
@@ -809,17 +854,19 @@ begin
   if proposal.expires_at <= clock_timestamp() then
     raise exception 'keyturn: the proposal expired at %', proposal.expires_at;
   end if;
-  -- A change a rule forbids is not written, whoever approved it and whenever. The rules for
-  -- these tables are held first and read after, as the rules below are, so that two proposals
-  -- held against one running total are taken one after the other.
-  perform from keyturn.forbidden f
-    where f.active and f.relation in (select c.relation from keyturn.changes c where c.proposal_id = p_proposal_id)
-    order by f.name for update;
-  if found then
-    if current_setting('transaction_isolation') <> 'read committed' then
-      raise exception 'keyturn: a table with a rule that forbids is written only in a read committed transaction; this one is %', current_setting('transaction_isolation')
-        using errcode = 'insufficient_privilege';
-    end if;
+  -- A change a rule forbids is not written, whoever approved it and whenever. Proposals for
+  -- a table with such a rule are taken one after the other, so that two of them held against
+  -- one running total cannot both pass.
+  --
+  -- A transaction that keeps one view of the data for its whole length cannot see a rule
+  -- written after it began, or what another proposal wrote a moment ago. So a proposal is
+  -- applied only in a read committed transaction, PostgreSQL's default.
+  if current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'keyturn: a proposal is applied only in a read committed transaction; this one is %', current_setting('transaction_isolation')
+      using errcode = 'insufficient_privilege';
+  end if;
+  guarded := keyturn.hold_forbidden(p_proposal_id);
+  if guarded then
     forbidden := keyturn.forbidden_in(p_proposal_id);
     if forbidden is not null then
       raise exception 'keyturn: nothing is written: %', forbidden using errcode = 'insufficient_privilege';
@@ -916,6 +963,14 @@ begin
         located := change.relation::oid;
         locate := keyturn.key_condition(change.relation, target.key_columns);
       end if;
+      -- Held against the rules again, with the changes before it in this proposal now written:
+      -- two changes that each pass a running total must also pass it together.
+      if guarded then
+        forbidden := keyturn.forbidden_by(change.relation, change.operation, change.before, change.after);
+        if forbidden is not null then
+          raise exception 'change % is forbidden by the rule %', change.seq, forbidden using errcode = 'KT002';
+        end if;
+      end if;
       -- Each write hands back the row as it was written, which is what gets held against the approval.
       written := null;
       if change.operation = 'insert' then
@@ -936,7 +991,9 @@ begin
       end if;
 
       -- A trigger or a default on the table may have written something other than what was approved.
-      if target.exact and change.operation = 'insert' and not coalesce(written @> change.after, false) then
+      -- Column by column, and equal, not "contains": a list a trigger added to is not the list that was approved.
+      if target.exact and change.operation = 'insert'
+         and exists (select from unnest(change.columns) as name where (written -> name) is distinct from (change.after -> name)) then
         raise exception 'keyturn: change %: the inserted row is not what was approved', change.seq using errcode = 'KT001';
       end if;
       if target.exact and change.operation = 'update' and written is distinct from change.after then
@@ -952,6 +1009,11 @@ begin
     -- caller tries again. Only a write the table itself turned down ends the proposal.
     if left(sqlstate, 2) in ('08', '40', '53', '55', '57', '58', 'XX') then
       raise;
+    end if;
+    -- A rule forbade it, with the earlier changes written. All of them are undone with this
+    -- one, and the proposal stays as it was: it may be applied once the rule allows.
+    if sqlstate = 'KT002' then
+      raise exception 'keyturn: nothing is written: %', sqlerrm using errcode = 'insufficient_privilege';
     end if;
     result := jsonb_build_object('status', 'failed', 'reason', sqlerrm);
     update keyturn.proposals set status = 'failed', outcome = result, finished_at = clock_timestamp() where id = p_proposal_id;

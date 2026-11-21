@@ -96,6 +96,10 @@ begin
       raise exception 'keyturn: % numbers its rows itself; an insert gives no value for that column', target.relation;
     end if;
     key := coalesce((select jsonb_object_agg(entry.key, entry.value) from jsonb_each(after) as entry where entry.key = any (target.key_columns)), '{}'::jsonb);
+    -- A key the table makes part of is not known yet. Half a key would name the wrong row.
+    if not (key ?& target.key_columns) then
+      key := '{}'::jsonb;
+    end if;
   else
     columns := '{}';
   end if;

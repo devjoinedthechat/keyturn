@@ -99,7 +99,8 @@ select keyturn.allow(
 - A rule decides when the proposal is applied, in the same transaction as the write, and proposals under one rule are taken one after the other. A running total in a condition therefore counts what was applied a moment before, and a limit cannot be passed in parts.
 - `test/policy-port.test.ts` in the repository holds a refund policy of nine conditions, written as one rule that lets through and one that forbids, against the same policy as code, on 1,302 refunds an agent could ask for.
 - The hourly count is kept by the rule's name and read from the audit log.
-- A rule decides only in a read committed transaction, the default. In any other, the proposal waits for a person.
+- A proposal is applied only in a read committed transaction, the default. In any other, `keyturn.apply` is refused.
+- A condition is worked out under fixed settings, whatever the session's are, with times in UTC. If it depends on another setting, such as a text search configuration, name that in the condition.
 - On a table with row-level security, give the rule a condition that keeps rows to what the agent may see. `keyturn doctor` points such tables out.
 - Switch one off with `update keyturn.rules set active = false where name = 'close_tickets'`.
 
@@ -120,7 +121,8 @@ select keyturn.forbid(
 - A change the condition holds for is refused when it is proposed, with the reason. Nothing is recorded, so the queue holds only what a person should look at.
 - It is held against the rules again when a person approves and when it is applied. An approval does not lift a rule.
 - A condition that cannot be worked out for a row, or that gives neither true nor false, forbids the row. Write the condition so that it is false for the rows you mean to allow.
-- A table with such a rule is written only in a read committed transaction, and proposals for it are applied one after the other.
+- Proposals for a table with such a rule are applied one after the other: each waits for the one before it to commit. An apply left open in a transaction holds up the others for that table, so give the agent's login an `idle_in_transaction_session_timeout`. It does not hold up the owner, who can always write or switch off a rule.
+- A change is held against the rules once more just before it is written, with the earlier changes of its proposal in place. Two changes that pass a running total one by one, and not together, are recorded and can be approved, and are refused when applied.
 - A rule that forbids is read before a rule that lets through.
 - Switch one off with `update keyturn.forbidden set active = false where name = 'refund_within_payment'`. `keyturn doctor` lists every active one.
 

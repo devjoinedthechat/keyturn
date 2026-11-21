@@ -286,3 +286,116 @@ describe("the rules that forbid", () => {
     expect(JSON.stringify(found.rows[0])).toContain("update keyturn.forbidden set active = false");
   });
 });
+
+describe("what an independent review found", () => {
+  test("two changes of one proposal that each pass a running total do not pass it together", async () => {
+    const account = fresh();
+    const proposed = await propose(agent, [charge(account, 600), charge(account, 600)]);
+    // Each is within the limit as things stand, so it is recorded and can be approved.
+    await approve(proposed);
+    const refused = await refusal(apply(agent, proposed.proposal_id));
+    expect(refused?.code).toBe("42501");
+    expect(refused?.message).toContain(
+      "nothing is written: change 2 is forbidden by the rule within_credit",
+    );
+    expect(await charged(account)).toBe(0);
+    const state = await owner.query("select status from keyturn.proposals where id = $1", [
+      proposed.proposal_id,
+    ]);
+    expect(state.rows[0].status).toBe("approved");
+
+    // The same through a rule that takes the person out: it does not get to decide.
+    await owner.query(
+      "select keyturn.allow('charges_alone', 'charges', array['insert'], array['id', 'account', 'amount'], max_rows => 2, per_hour => 1000)",
+    );
+    const alone = await propose(agent, [charge(account, 600), charge(account, 600)]);
+    expect((await refusal(apply(agent, alone.proposal_id)))?.message).toContain(
+      "change 2 is forbidden by the rule within_credit",
+    );
+    expect(await charged(account)).toBe(0);
+    expect(
+      (await owner.query("select status from keyturn.proposals where id = $1", [alone.proposal_id]))
+        .rows[0].status,
+    ).toBe("pending");
+  });
+
+  test("a session setting does not change what a condition says", async () => {
+    await forbid(
+      String.raw`'no_refund_word', 'charges', array['insert'], $$after ->> 'note' ~ '\mrefund\M'$$, 'Refunds are not made as charges.'`,
+    );
+    await owner.query(
+      String.raw`select keyturn.allow('numbered', 'charges', array['insert'], array['id', 'account', 'amount', 'note'], condition => $$after ->> 'note' ~ '^\d+$'$$, per_hour => 1000)`,
+    );
+    const noted = (note: string) => ({
+      table: "charges",
+      operation: "insert",
+      values: { id: fresh() + 40_000, account: fresh(), amount: 5, note },
+    });
+    const sly = await database.as(logins.agent);
+    // With this off, a backslash in a string is an escape, and "\d" would read as "d".
+    await sly.query("set standard_conforming_strings = off");
+    await sly.query("set transform_null_equals = on");
+    expect((await refusal(propose(sly, [noted("refund now")])))?.message).toContain(
+      "forbidden by the rule no_refund_word",
+    );
+    // "ddd" is not a number, whatever the session says a backslash is.
+    const letters = await propose(sly, [noted("ddd")]);
+    expect((await refusal(apply(sly, letters.proposal_id)))?.message).toContain(
+      "pending, not approved",
+    );
+    // And a number still goes through on the rule.
+    const digits = await propose(sly, [noted("123")]);
+    expect((await apply(sly, digits.proposal_id)).status).toBe("applied");
+
+    // An approver with the setting off cannot approve past the rule either.
+    await owner.query("update keyturn.forbidden set active = false where name = 'no_refund_word'");
+    const waiting = await propose(agent, [noted("refund later")]);
+    await owner.query("update keyturn.forbidden set active = true where name = 'no_refund_word'");
+    const careless = await database.as(logins.bob);
+    await careless.query("set standard_conforming_strings = off");
+    expect(
+      (
+        await refusal(
+          careless.query("select keyturn.approve($1, $2)", [
+            waiting.proposal_id,
+            waiting.content_hash,
+          ]),
+        )
+      )?.message,
+    ).toContain("no one may approve this");
+  });
+
+  test("an apply left open does not stop the owner writing or switching off a rule", async () => {
+    const account = fresh();
+    const proposed = await propose(agent, [charge(account, 10)]);
+    await approve(proposed);
+    await agent.query("begin");
+    expect((await apply(agent, proposed.proposal_id)).status).toBe("applied");
+    await owner.query("set lock_timeout = '1500ms'");
+    const blocked = await refusal(
+      owner.query("update keyturn.forbidden set active = false where name = 'within_credit'"),
+    );
+    await owner.query("update keyturn.forbidden set active = true where name = 'within_credit'");
+    await owner.query("reset lock_timeout");
+    await agent.query("commit");
+    expect(blocked).toBeNull();
+  });
+
+  test("a rule written after a transaction fixed its view of the data is not missed", async () => {
+    await owner.query("delete from keyturn.forbidden");
+    const account = fresh();
+    const proposed = await propose(agent, [charge(account, 10)]);
+    await approve(proposed);
+    await agent.query("begin isolation level repeatable read");
+    await agent.query("select count(*) from keyturn.proposals");
+    await forbid(`'frozen', 'charges', array['insert'], 'true', 'Charging is frozen.'`);
+    const refused = await refusal(apply(agent, proposed.proposal_id));
+    await agent.query("rollback");
+    expect(refused?.message).toContain("only in a read committed transaction");
+    expect(await charged(account)).toBe(0);
+    // In the default kind of transaction the rule is seen.
+    expect((await refusal(apply(agent, proposed.proposal_id)))?.message).toContain(
+      "forbidden by the rule frozen",
+    );
+  });
+});

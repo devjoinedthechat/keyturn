@@ -34,6 +34,7 @@ declare
   result    jsonb;
   forbidden text;
   names     text;
+  guarded   boolean;
 begin
   if not keyturn.caller_is('keyturn_approver') then
     raise exception 'keyturn: % is not an approver', session_user using errcode = 'insufficient_privilege';
@@ -52,15 +53,14 @@ begin
     raise exception 'keyturn: the proposal is %, not applied: there is nothing to take back', proposal.status;
   end if;
 
+  -- A transaction that keeps one view of the data cannot see a rule written after it began.
+  if current_setting('transaction_isolation') <> 'read committed' then
+    raise exception 'keyturn: a change is taken back only in a read committed transaction; this one is %', current_setting('transaction_isolation')
+      using errcode = 'insufficient_privilege';
+  end if;
   -- Taking a change back is a write like any other, and a rule that forbids holds for it.
-  perform from keyturn.forbidden f
-    where f.active and f.relation in (select c.relation from keyturn.changes c where c.proposal_id = p_proposal_id)
-    order by f.name for update;
-  if found then
-    if current_setting('transaction_isolation') <> 'read committed' then
-      raise exception 'keyturn: a table with a rule that forbids is written only in a read committed transaction; this one is %', current_setting('transaction_isolation')
-        using errcode = 'insufficient_privilege';
-    end if;
+  guarded := keyturn.hold_forbidden(p_proposal_id);
+  if guarded then
     for change in select * from keyturn.changes where proposal_id = p_proposal_id order by seq loop
       left_as := coalesce(change.as_written, change.after);
       forbidden := case change.operation
@@ -91,9 +91,9 @@ begin
     end if;
     left_as := coalesce(change.as_written, change.after);
     -- An insert that left its key to the table has it in the row as written.
-    row_key := case when change.key <> '{}'::jsonb then change.key
+    row_key := case when change.key ?& target.key_columns then change.key
                 else (select jsonb_object_agg(part.key, part.value) from jsonb_each(left_as) as part where part.key = any (target.key_columns)) end;
-    if row_key is null then
+    if row_key is null or not (row_key ?& target.key_columns) then
       result := jsonb_build_object('status', 'conflict', 'change', change.seq, 'reason', format('the row written to %s was not recorded, so it cannot be found again', change.relation_name));
       exit;
     end if;
@@ -107,7 +107,8 @@ begin
     elsif current_ is null then
       result := jsonb_build_object('status', 'conflict', 'change', change.seq, 'reason', format('the row %s of %s is gone', row_key, change.relation_name));
       exit;
-    elsif (change.operation = 'insert' and not current_ @> left_as) or (change.operation = 'update' and current_ is distinct from left_as) then
+    -- Equal, not "contains": a list somebody has added to since is their work.
+    elsif current_ is distinct from left_as then
       result := jsonb_build_object('status', 'conflict', 'change', change.seq, 'reason', format('the row %s of %s has changed since the change was applied', row_key, change.relation_name));
       exit;
     end if;
@@ -121,9 +122,21 @@ begin
   for change in select * from keyturn.changes where proposal_id = p_proposal_id order by seq desc loop
     select * into target from keyturn.protected where relation = change.relation;
     left_as := coalesce(change.as_written, change.after);
-    row_key := case when change.key <> '{}'::jsonb then change.key
+    row_key := case when change.key ?& target.key_columns then change.key
                 else (select jsonb_object_agg(part.key, part.value) from jsonb_each(left_as) as part where part.key = any (target.key_columns)) end;
     locate := keyturn.key_condition(change.relation, target.key_columns);
+    -- Held against the rules again with the later changes already taken back: two rows that
+    -- may each be removed alone must also be allowed to go together.
+    if guarded then
+      forbidden := case change.operation
+        when 'insert' then keyturn.forbidden_by(change.relation, 'delete', left_as, null)
+        when 'update' then keyturn.forbidden_by(change.relation, 'update', left_as, change.before)
+        else keyturn.forbidden_by(change.relation, 'insert', null, change.before) end;
+      if forbidden is not null then
+        raise exception 'keyturn: nothing is taken back: undoing change % is forbidden by the rule %', change.seq, forbidden
+          using errcode = 'insufficient_privilege';
+      end if;
+    end if;
     put_back := null;
     if change.operation = 'insert' then
       execute format('delete from %s t where %s', change.relation, locate) using row_key;

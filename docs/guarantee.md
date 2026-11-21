@@ -33,7 +33,9 @@ A proposal goes through on rules only when every change in it is covered. The re
 
 An agent cannot write or change a rule, or read what one says. It does learn the name of a rule that let its own proposal through. `keyturn.doctor()` lists every active one.
 
-A rule decides only in a read committed transaction, PostgreSQL's default. In one that keeps a single view of the data, it could not count what it has already let through, so it refuses.
+A proposal is applied only in a read committed transaction, PostgreSQL's default. One that keeps a single view of the data could not count what a rule has already let through, or see a rule written after it began, so it is refused.
+
+A condition means the same whoever proposes or approves. It is worked out under fixed settings, whatever the session's are: a backslash in a string is a backslash, `= null` is not read as `is null`, and dates and times are written one way, in UTC.
 
 ## Rules that forbid
 
@@ -46,7 +48,11 @@ The owner may also write a rule for changes that no one may approve.
 | It is applied               | Nothing is written, whoever approved it, until the rule no longer forbids |
 | A rule would let it through | The rule that forbids is read first, and the other does not get to decide |
 
-A condition that cannot be worked out for a row, or that gives neither true nor false, forbids the row. Proposals for a table with such a rule are applied one after the other, so a running total in a condition holds against two applied at once.
+A condition that cannot be worked out for a row, or that gives neither true nor false, forbids the row.
+
+A running total in a condition holds. Proposals for a table with such a rule are applied one after the other, so it holds against two applied at once. And each change is held against the rules again just before it is written, with the changes before it in the same proposal already in place, so it holds against two changes in one proposal. Such a proposal can be recorded and approved, since each change passes as things stand; it is when it is applied that nothing is written.
+
+A refusal tells the agent something. A condition that reads a table the agent may not read still answers yes or no to whatever the agent proposes, and a proposal made and rolled back leaves no entry. Whoever may propose can learn, one answer at a time, what a condition compares against. Keep out of conditions what must stay secret from the agent.
 
 ## The record
 
@@ -64,11 +70,13 @@ An approver may take an applied proposal back. Every row it wrote is put as the 
 | ------------------------------------- | ------------------------------------------------------------------------------- |
 | Only a person's login does it         | It is for `keyturn_approver`. An agent is refused                               |
 | All of it or none                     | One row that cannot be put back leaves every row as it is                       |
-| Nobody's later work is written over   | Each row is locked and must still be as the proposal left it                    |
+| Nobody's later work is written over   | Each row is locked and must still be exactly as the proposal left it            |
 | The rules that forbid hold for it too | Putting a row back is a write, and is held against them as one                  |
 | It is on record, once                 | The proposal becomes `reverted`, with the login and the reason in the audit log |
 
 A proposal that was taken back is not applied again.
+
+This is about the proposal's own rows. Rows that others have since attached to one of them, and that the table deletes with it by a cascade, go with it. On a table protected with the loose option, the columns the proposal set are put back, and a column a trigger changes is as the trigger leaves it.
 
 ## Who it holds against
 

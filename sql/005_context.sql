@@ -97,6 +97,10 @@ create function keyturn.waits_because(p_proposal_id uuid)
   returns table (seq integer, rule text, because text)
   language plpgsql stable security definer
   set search_path = pg_catalog, pg_temp
+  -- Conditions are worked out here as they are when a proposal is applied.
+  set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
+  set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
+  set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
   as $$
 #variable_conflict use_column
 declare
