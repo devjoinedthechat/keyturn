@@ -34,5 +34,6 @@ Measured with `pnpm bench` ([bench/overhead.ts](../bench/overhead.ts)).
 - **A direct bulk write is far cheaper per row.** PostgreSQL deletes 10,000 rows in one pass. Keyturn records each row's content, hashes it, then locks, compares and writes each row on apply.
 - **A statement through a view uses the table's indexes.** Naming one row reads one row.
 - **Approval hashes the whole proposal**, so its time grows with the proposal's size.
+- **These are for a table with no rule that forbids.** With one, its condition is worked out for every proposed row, and again for every row when the proposal is applied. That roughly doubled the time to propose in one measurement, before whatever the condition itself reads.
 
 A proposal of thousands of rows is rare, and a person takes far longer to read it than the database takes to record it.

@@ -124,9 +124,12 @@ begin
     raise exception 'keyturn: a proposal holds at most 10000 changes, and this reaches more. Nothing is recorded. Narrow the statement, or make the change in parts';
   end if;
 
-  forbidden := keyturn.forbidden_by(target.relation, operation, before, after);
-  if forbidden is not null then
-    raise exception 'keyturn: forbidden by the rule %. Nothing is recorded', forbidden using errcode = 'insufficient_privilege';
+  -- Asked first whether the table has such a rule at all: see keyturn.record_proposal.
+  if exists (select from keyturn.forbidden f where f.active and f.relation = target.relation) then
+    forbidden := keyturn.forbidden_by(target.relation, operation, before, after);
+    if forbidden is not null then
+      raise exception 'keyturn: forbidden by the rule %. Nothing is recorded', forbidden using errcode = 'insufficient_privilege';
+    end if;
   end if;
 
   insert into keyturn.changes (proposal_id, seq, relation, relation_name, shape, operation, key, before, after, columns)

@@ -613,9 +613,14 @@ begin
       raise exception 'keyturn: change %: the row % of % already has a change in this proposal', seq, key, target.relation;
     end if;
 
-    forbidden := keyturn.forbidden_by(target.relation, operation, before, after);
-    if forbidden is not null then
-      raise exception 'keyturn: change %: forbidden by the rule %. Nothing is recorded', seq, forbidden using errcode = 'insufficient_privilege';
+    -- Asked first whether the table has such a rule at all. Working a condition out means
+    -- fixing the session's settings for the call, which costs more than this look does, and
+    -- most tables have no such rule.
+    if exists (select from keyturn.forbidden f where f.active and f.relation = target.relation) then
+      forbidden := keyturn.forbidden_by(target.relation, operation, before, after);
+      if forbidden is not null then
+        raise exception 'keyturn: change %: forbidden by the rule %. Nothing is recorded', seq, forbidden using errcode = 'insufficient_privilege';
+      end if;
     end if;
 
     insert into keyturn.changes (proposal_id, seq, relation, relation_name, shape, operation, key, before, after, columns)
