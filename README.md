@@ -195,6 +195,7 @@ keyturn approve 0f65fb6a     # shows it, asks, approves what was shown
 keyturn reject 0f65fb6a --reason "..."
 keyturn review               # the same on a page, on this machine only
 keyturn revert 0f65fb6a      # take an applied change back
+keyturn watch --slack https://hooks.slack.com/services/...   # say so when one is waiting
 ```
 
 <picture>
@@ -266,7 +267,7 @@ Every step is an entry in `keyturn.audit`, written in the same transaction as th
 keyturn verify-audit
 ```
 
-It reports an entry that was altered, one that is missing, and a proposal whose state has no entry behind it. It also prints one value for the whole log; kept outside the database, that value shows a rewrite by someone able to switch the log's guards off.
+It reports an entry that was altered, one that is missing, and a proposal whose state has no entry behind it. Old records are put away with `keyturn archive`: finished proposals go to a file that can be checked with no database, and only what the file holds is removed. It also prints one value for the whole log; kept outside the database, that value shows a rewrite by someone able to switch the log's guards off.
 
 ## What it guarantees, and what it does not
 
@@ -306,7 +307,7 @@ The time that matters is the person's. Keyturn is for changes worth a person's l
 - **The table's triggers, defaults and cascades run at apply.** A row that comes out different from what was approved fails the apply, unless the table was protected with `--loose`.
 - **Installing needs three roles.** If the installing login may not create roles, `keyturn install` prints the three statements for an administrator.
 
-[docs/operating.md](docs/operating.md) covers installing, schema changes, rules, the audit log and removal.
+[docs/operating.md](docs/operating.md) covers installing, moving to a later version, rules, the audit log and removal. [docs/support.md](docs/support.md) says what happens with each kind of table, column and statement, each line held by a test.
 
 ## How it differs
 
