@@ -111,6 +111,14 @@ report(
   ),
 );
 
+// A login may have 200 proposals waiting. The ones a measurement leaves behind are turned
+// down before the next, outside what is timed.
+const clear = () =>
+  approver.query(
+    "select keyturn.reject(id, 'bench') from keyturn.proposals where status = 'pending'",
+  );
+await clear();
+
 // Many rows in one statement.
 for (const size of [100, 1000, 10000]) {
   const few = Math.max(3, Math.round(runs / (size / 10) / 4));
@@ -149,6 +157,7 @@ for (const size of [100, 1000, 10000]) {
       ]);
     }),
   );
+  await clear();
   report(`propose through the view, ${size} rows`, median(many.propose));
   report(`approve, ${size} rows`, median(many.approve));
   report(`apply, ${size} rows`, median(many.apply));
