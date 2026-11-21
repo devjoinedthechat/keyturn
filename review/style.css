@@ -8,29 +8,32 @@
  */
 
 :root {
-  --chrome: #14171b;
-  --chrome-raised: #1d2126;
-  --chrome-edge: #3a4149;
-  --chrome-ink: #f2f3f1;
-  --chrome-soft: #a3aab3;
+  /* One family. Warm blacks and warm papers, and one colour, the orange of the mark, in
+     three depths: bright on the dark surface, full on the light one, and deep for what a
+     change takes away. Nothing on the page is any other colour. */
+  --chrome: #1b1816;
+  --chrome-raised: #26211e;
+  --chrome-edge: #453d37;
+  --chrome-ink: #f6f2ed;
+  --chrome-soft: #b3a9a0;
   --turn-bright: #fb8a3c;
-  --turn-bright-ink: #1c0f05;
-  --alarm-bright: #ff9488;
-  --live: #4ade80;
+  --turn-bright-ink: #1f1006;
 
-  --paper: #efeeea;
-  --sheet: #ffffff;
-  --ink: #191c20;
-  --soft: #5a616a;
-  --rule: #dcdad3;
-  --faint: #f5f4f0;
+  --paper: #f2eee8;
+  --sheet: #fffdfa;
+  --ink: #1e1a17;
+  --soft: #6a6058;
+  --rule: #e1dad1;
+  --faint: #f5f1eb;
   --turn: #b83b0a;
-  --turn-wash: #fff0e4;
-  --gone: #b42318;
-  --gone-wash: #fdecea;
-  --came: #146c3c;
-  --came-wash: #e4f5ea;
-  --lift: 0 1px 2px rgb(20 23 27 / 8%), 0 6px 18px rgb(20 23 27 / 7%);
+  --turn-wash: #fdeede;
+  /* What is taken away: the same orange, deeper. */
+  --gone: #8f2a05;
+  --gone-wash: #f9e1d1;
+  /* What is added is the plain ink of the page: it is what will be there. */
+  --came: var(--ink);
+  --came-wash: #ece6de;
+  --lift: 0 1px 2px rgb(30 26 23 / 8%), 0 6px 18px rgb(30 26 23 / 7%);
 
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -38,23 +41,22 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --chrome: #0b0d0f;
-    --chrome-raised: #15181c;
-    --chrome-edge: #30363d;
+    --chrome: #100e0c;
+    --chrome-raised: #1b1816;
+    --chrome-edge: #3a332e;
 
-    --paper: #111417;
-    --sheet: #181c20;
-    --ink: #e9ebed;
-    --soft: #9aa3ad;
-    --rule: #2a3037;
-    --faint: #1f2429;
+    --paper: #171412;
+    --sheet: #1e1a18;
+    --ink: #f1ece6;
+    --soft: #aba198;
+    --rule: #342e2a;
+    --faint: #26211e;
     --turn: #fb8a3c;
-    --turn-wash: #33210f;
-    --gone: #ff9488;
-    --gone-wash: #3a1c1a;
-    --came: #84dba6;
-    --came-wash: #143021;
-    --lift: 0 0 0 1px #2a3037;
+    --turn-wash: #3b2513;
+    --gone: #ffa877;
+    --gone-wash: #4a2410;
+    --came-wash: #2f2925;
+    --lift: 0 0 0 1px #342e2a;
   }
 }
 
@@ -141,20 +143,22 @@ button {
   font-size: 13px;
 }
 
-/* Whether the page still has the database. Green while it does. */
+/* Whether the page still has the database: a full dot while it does, a hollow one when it is lost. */
 .who::before {
   content: "";
   display: inline-block;
   width: 7px;
   height: 7px;
   margin-right: 8px;
+  border: 1.5px solid var(--chrome-soft);
   border-radius: 50%;
-  background: var(--live);
+  background: var(--chrome-soft);
   vertical-align: 1px;
 }
 
 body:has(.lost:not([hidden])) .who::before {
-  background: var(--alarm-bright);
+  border-color: var(--turn-bright);
+  background: none;
 }
 
 .views {
@@ -961,7 +965,7 @@ button:disabled {
 
 .key .refused {
   margin-top: 8px;
-  color: var(--alarm-bright);
+  color: var(--turn-bright);
 }
 
 .said {
