@@ -455,8 +455,10 @@ describe("the review page", () => {
     const review = await reviewAs(logins.alice);
     const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
     await page.goto(`http://127.0.0.1:${review.port}/#${made.id}`);
-    await expect.poll(() => page.locator(".row-key").count()).toBe(1);
-    expect(await page.locator(".row-key").innerText()).toContain("id 9007199254740993");
+    // Another proposal's row may be on screen first, so wait for this one's.
+    await expect
+      .poll(() => page.locator(".row-key").allInnerTexts(), { timeout: 10_000 })
+      .toEqual([expect.stringContaining("id 9007199254740993")]);
 
     const body = page.locator(".change tr", { hasText: "body" });
     expect(await body.locator(".was .code").count()).toBe(0);
@@ -504,6 +506,52 @@ describe("the review page", () => {
     await new Keyturn(await database.as(logins.bob)).reject(large.id);
     await new Keyturn(await database.as(logins.bob)).reject(small.id);
     await page.context().close();
+  });
+
+  test("opens the proposal whose address arrives while the page is still starting", async () => {
+    const made = [
+      await agent.propose([refund(71)], { note: "Linked, one." }),
+      await agent.propose([refund(72)], { note: "Linked, two." }),
+    ];
+    const review = await reviewAs(logins.alice);
+    // One of the two is not first in the queue, and that one is the test.
+    for (const [index, linked] of made.entries()) {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      // The first proposal the page reads on its own is held back.
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let seen: () => void = () => {};
+      const reading = new Promise<void>((resolve) => {
+        seen = resolve;
+      });
+      let first = true;
+      await page.route("**/api/proposals/*/rows*", async (route) => {
+        if (first) {
+          first = false;
+          seen();
+          await held;
+        }
+        await route.continue();
+      });
+      await page.goto(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+      await reading;
+      await page.evaluate(`location.hash = ${JSON.stringify(linked.id)}`);
+      release();
+      await expect
+        .poll(() => page.locator(".note").allTextContents(), { timeout: 10_000 })
+        .toEqual([`Linked, ${index === 0 ? "one" : "two"}.`]);
+      await page.waitForTimeout(300);
+      expect(await page.locator(".note").textContent()).toBe(
+        `Linked, ${index === 0 ? "one" : "two"}.`,
+      );
+      await context.close();
+    }
+    for (const proposal of made) {
+      await new Keyturn(await database.as(logins.bob)).reject(proposal.id);
+    }
   });
 
   test("takes the open proposal off the page the moment another is chosen", async () => {

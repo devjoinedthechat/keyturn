@@ -1058,22 +1058,26 @@ async function start() {
       loadList().catch(() => {});
     });
   }
-  await loadList().catch(() => {});
-  const asked = location.hash.slice(1);
-  if (uuid.test(asked)) {
-    await open(asked);
-  } else if (state.list.length > 0) {
-    await open(state.list[0].id);
-  } else {
-    drawSheet();
-  }
   // A proposal's address, pasted or followed while the page is open, opens that proposal.
+  // This listens before the first read: an address that arrives while the page is still
+  // starting must not lose to whichever proposal happens to be first in the queue.
   window.addEventListener("hashchange", () => {
     const wanted = location.hash.slice(1);
     if (uuid.test(wanted) && wanted !== state.id) {
       open(wanted);
     }
   });
+  await loadList().catch(() => {});
+  const asked = location.hash.slice(1);
+  if (uuid.test(asked)) {
+    if (asked !== state.id) {
+      await open(asked);
+    }
+  } else if (state.id === null && state.list.length > 0) {
+    await open(state.list[0].id);
+  } else if (state.id === null) {
+    drawSheet();
+  }
   // One look at a time: the next is not started until the last has come back.
   const again = async () => {
     if (!document.hidden) {
