@@ -95,6 +95,9 @@ select keyturn.allow(
 
 - Writing a rule of the same name replaces it and raises its version.
 - The condition is SQL over two `jsonb` values, `before` and `after`. A row it cannot be worked out for is not covered.
+- A condition may read other tables, for a limit kept elsewhere or a running total. Name them with their schema, as in `public.payments`: a condition is worked out with an empty search path, and a table named without one is refused when the rule is written.
+- A rule decides when the proposal is applied, in the same transaction as the write, and proposals under one rule are taken one after the other. A running total in a condition therefore counts what was applied a moment before, and a limit cannot be passed in parts.
+- `test/policy-port.test.ts` in the repository holds a refund policy of nine conditions, written as one rule, against the same policy as code, on 1,302 refunds an agent could ask for.
 - The hourly count is kept by the rule's name and read from the audit log.
 - A rule decides only in a read committed transaction, the default. In any other, the proposal waits for a person.
 - On a table with row-level security, give the rule a condition that keeps rows to what the agent may see. `keyturn doctor` points such tables out.

@@ -212,7 +212,7 @@ select keyturn.allow('close_tickets', 'tickets', array['update'], array['status'
                      per_hour => 60);
 ```
 
-A proposal goes through on rules only when every change in it is covered. The audit log then names the rule and its version, and records that no person decided. `keyturn doctor` lists every active rule.
+A condition may read other tables, so a rule can hold a limit kept elsewhere or a running total. A proposal goes through on rules only when every change in it is covered. The audit log then names the rule and its version, and records that no person decided. `keyturn doctor` lists every active rule.
 
 ## The audit log
 
