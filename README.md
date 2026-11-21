@@ -59,6 +59,7 @@ proposal  0f65fb6a-6f20-4799-afc1-7328d0f2ae78  pending, expires in 24 hours
 by        support_agent, a moment ago
 note      Cleaning up old test orders, as asked.
 hash      5a04fb4d66f7eaf7dc21ea960870b6d345d97e163dfaab0ea87cb0d46402448f
+waits     no rule lets a change to public.orders through without a person
 
   public.orders  8,114 deletes
 
