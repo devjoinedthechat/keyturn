@@ -202,6 +202,8 @@ What an agent wrote is shown exactly. Hidden and direction-reversing characters 
 
 A refund is an id and an amount; whether it is right is in the payment it points to. So beside the rows, `keyturn show` and the page give two more things. Why the proposal has come to a person: which rule did not cover it, and what the rule lacked. And the rows it points to through foreign keys, read with the approver's own rights. A row that points to nothing says so. These are shown as they are at that moment and are no part of what is approved.
 
+In a small study, reviewers shown 36 proposed refunds as rows alone could not decide one of them. Shown the same refunds with this beside them, they caught all 30 wrong ones and approved all 6 right ones. The reviewers were language models, so this says the screen holds what a decision needs, not that a tired person reads it. [docs/catch-rate.md](docs/catch-rate.md) has the method and its limits.
+
 Its server listens on 127.0.0.1, needs a key made for each run, refuses requests from other sites, and loads nothing but its own three files.
 
 ## Changes that need no person
