@@ -5,6 +5,8 @@
 .private-patterns
 .research/
 
+# with and without the slash: a link named node_modules is not a folder
+node_modules
 node_modules/
 coverage/
 dist/
