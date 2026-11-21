@@ -1,4 +1,12 @@
-import type { ColumnDiff, Extent, Finding, Proposal, RowDiff } from "./keyturn.ts";
+import type {
+  ColumnDiff,
+  Extent,
+  Finding,
+  Proposal,
+  Reference,
+  RowDiff,
+  Waiting,
+} from "./keyturn.ts";
 
 /**
  * Text that came from an agent, made safe to print. A proposal's note and its values are
@@ -107,11 +115,18 @@ export function standing(proposal: Proposal, now: Date = new Date()): string {
 const count = (rows: number, operation: string) =>
   `${rows.toLocaleString("en")} ${operation}${rows === 1 ? "" : "s"}`;
 
+/** What a decision rests on beside the rows themselves. Read when asked for; no part of what is approved. */
+export interface Context {
+  references: Reference[];
+  waits: Waiting[];
+}
+
 export function renderProposal(
   proposal: Proposal,
   extent: Extent[],
   rows: RowDiff[],
   style: Style,
+  context: Context = { references: [], waits: [] },
 ): string {
   const lines: string[] = [];
   const field = (name: string, text: string) =>
@@ -129,6 +144,15 @@ export function renderProposal(
     field("outcome", plain(proposal.outcome.reason));
   }
   field("hash", proposal.contentHash);
+  if (context.waits.length > 0) {
+    const reasons = context.waits.map(
+      (wait) =>
+        (wait.seq === null ? "" : `change ${wait.seq}: `) +
+        (wait.rule === null ? "" : `the rule ${plain(wait.rule)} `) +
+        plain(wait.because),
+    );
+    field("waits", reasons.join("\n          "));
+  }
   lines.push("");
 
   const width = Math.max(...extent.map((part) => part.table.length), 0);
@@ -176,6 +200,33 @@ export function renderProposal(
       lines.push(
         paint(style, "dim", `     (${hidden} other column${hidden === 1 ? "" : "s"} unchanged)`),
       );
+    }
+    for (const reference of context.references.filter((candidate) => candidate.seq === row.seq)) {
+      const pointing = Object.entries(reference.key)
+        .map(([part, text]) => `${plain(part)} = ${text === null ? "null" : plain(text)}`)
+        .join(", ");
+      const head = `   refers to ${plain(reference.table)}  ${pointing}`;
+      if (reference.state !== "shown") {
+        lines.push(
+          paint(
+            style,
+            "yellow",
+            `${head}: ${reference.state === "missing" ? "no such row" : "this login may not read that table"}`,
+          ),
+        );
+        continue;
+      }
+      lines.push(paint(style, "dim", `${head}  (as it is now)`));
+      const wide = Math.max(...reference.columns.map((column) => column.column.length), 0);
+      for (const column of reference.columns) {
+        lines.push(
+          paint(
+            style,
+            "dim",
+            `       ${plain(column.column).padEnd(wide)}  ${value(style, column.value, column.kind)}`,
+          ),
+        );
+      }
     }
   }
 

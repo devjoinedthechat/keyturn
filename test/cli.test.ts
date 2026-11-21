@@ -418,3 +418,41 @@ describe("from the terminal", () => {
     expect(failing.stderr).toContain("Refused:");
   });
 });
+
+describe("what a decision rests on, from the terminal", () => {
+  test("an approver is shown why it waits and the rows it points to; an agent only the rows", async () => {
+    await owner.query(`
+      create table accounts (id integer primary key, holder text not null, credit_limit integer not null);
+      create table charges (id integer primary key, account integer references accounts (id), amount integer not null);
+      insert into accounts values (1, 'Ada Lund', 500);
+      select keyturn.protect('charges');
+      grant select on accounts, charges to keyturn_agent, keyturn_approver;
+      select keyturn.allow('small_charges', 'charges', array['insert'], array['id', 'account', 'amount'],
+                           condition => '(after ->> ''amount'')::integer <= 100');
+    `);
+    const proposer = new Keyturn(await database.as(logins.agent));
+    const made = await proposer.propose([
+      { table: "charges", operation: "insert", values: { id: 1, account: 1, amount: 450 } },
+      { table: "charges", operation: "insert", values: { id: 2, account: 77, amount: 5 } },
+    ]);
+
+    const forApprover = await keyturn(logins.alice, ["show", made.id]);
+    expect(forApprover.code).toBe(0);
+    expect(forApprover.out).toContain(
+      "the rule small_charges lets through one row in a proposal, and this one holds 2",
+    );
+    expect(forApprover.out).toContain("refers to public.accounts  account = 1  (as it is now)");
+    expect(forApprover.out).toMatch(/holder\s+"Ada Lund"/);
+    expect(forApprover.out).toMatch(/credit_limit\s+500/);
+    expect(forApprover.out).toContain("refers to public.accounts  account = 77: no such row");
+
+    const forAgent = await keyturn(logins.agent, ["show", made.id]);
+    expect(forAgent.out).not.toContain("small_charges");
+    expect(forAgent.out).toContain("refers to public.accounts  account = 1");
+
+    const asJson = JSON.parse((await keyturn(logins.alice, ["show", made.id, "--json"])).out);
+    expect(asJson.references).toHaveLength(2);
+    expect(asJson.waits[0]).toMatchObject({ seq: null, rule: "small_charges" });
+    await new Keyturn(await database.as(logins.alice)).reject(made.id);
+  });
+});

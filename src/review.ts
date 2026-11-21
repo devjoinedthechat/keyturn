@@ -158,6 +158,8 @@ export async function serveReview(
         proposal,
         extent: await keyturn.extent(id),
         history: await keyturn.history(id),
+        // Why it has come to a person. Only an approver is told.
+        waits: proposal.status === "pending" ? await keyturn.waitsBecause(id).catch(() => []) : [],
       });
       return;
     }
@@ -174,6 +176,8 @@ export async function serveReview(
       send(response, 200, {
         contentHash: proposal.contentHash,
         rows: await keyturn.diff(id, { from, count }),
+        // The rows these rows point to, as they are now. No part of what the hash names.
+        references: await keyturn.refersTo(id, { from, count }),
       });
       return;
     }

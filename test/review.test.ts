@@ -712,3 +712,78 @@ describe("the review page", () => {
     }
   });
 });
+
+describe("what a decision rests on, on the page", () => {
+  beforeAll(async () => {
+    await owner.query(`
+      create table buyers (id integer primary key, name text not null, credit_limit integer not null);
+      create table claims (id integer primary key, buyer integer references buyers (id), amount integer not null);
+      insert into buyers values (1, 'Ada Lund', 500), (2, 'ab' || chr(8238) || 'dc', 40);
+      insert into claims values (900, 1, 10);
+      select keyturn.protect('claims');
+      grant select on buyers, claims to keyturn_agent, keyturn_approver;
+      select keyturn.allow('small_claims', 'claims', array['insert'], array['id', 'buyer', 'amount'],
+                           condition => '(after ->> ''amount'')::integer <= 100');
+    `);
+  });
+
+  const claim = (id: number, buyer: number, amount: number) => ({
+    table: "claims",
+    operation: "insert" as const,
+    values: { id, buyer, amount },
+  });
+
+  test("an approver reads why it waits, and the rows the changes point to, beside them", async () => {
+    await agent.propose([claim(1, 1, 450), claim(2, 1, 20), claim(3, 2, 5), claim(4, 77, 5)], {
+      note: "Four claims.",
+    });
+    const review = await reviewAs(logins.alice);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.locator(".queue button", { hasText: "Four claims" }).click();
+    await expect.poll(() => page.locator(".grid.insert tbody tr").count()).toBe(4);
+
+    expect(await page.locator(".waits li").allInnerTexts()).toEqual([
+      "the rule small_claims lets through one row in a proposal, and this one holds 4",
+    ]);
+
+    const points = page.locator(".points-to");
+    expect(await points.count()).toBe(1);
+    expect(await points.locator(".points-head").innerText()).toContain("public.buyers");
+    expect(await points.locator(".points-head").innerText()).toContain(
+      "as it is now, and no part of what is approved",
+    );
+    // Two changes point to one buyer: it is one line, and says which two.
+    const lines = points.locator("tbody tr");
+    expect(await lines.count()).toBe(3);
+    expect(await lines.nth(0).locator("td").first().innerText()).toBe("1, 2");
+    expect(await lines.nth(0).innerText()).toContain("Ada Lund");
+    expect(await lines.nth(0).innerText()).toContain("500");
+    // A value that would read back to front is written with the character's code, as in the rows themselves.
+    expect(await lines.nth(1).locator(".code").count()).toBeGreaterThan(0);
+    expect(await lines.nth(1).innerText()).not.toContain("‮");
+    expect(await lines.nth(2).innerText()).toContain("There is no such row.");
+
+    const found = await new AxeBuilder({ page }).analyze();
+    expect(found.violations.map((violation) => violation.id)).toEqual([]);
+    if (shots !== undefined) {
+      await page.screenshot({ path: `${shots}/review-context.png` });
+    }
+    await page.context().close();
+  });
+
+  test("an update has what it points to under it, and an agent is not told why it waits", async () => {
+    const made = await agent.propose(
+      [{ table: "claims", operation: "update", key: { id: 900 }, set: { amount: 480 } }],
+      { note: "Raise claim 900." },
+    );
+    const review = await reviewAs(logins.agent);
+    const page = await pageAt(`http://127.0.0.1:${review.port}/#${keyOf(review)}`);
+    await page.goto(`http://127.0.0.1:${review.port}/#${made.id}`);
+    await expect
+      .poll(() => page.locator(".points-to tbody tr").allInnerTexts(), { timeout: 10_000 })
+      .toEqual([expect.stringContaining("Ada Lund")]);
+    expect(await page.locator(".change + .points-to").count()).toBe(1);
+    expect(await page.locator(".waits").count()).toBe(0);
+    await page.context().close();
+  });
+});

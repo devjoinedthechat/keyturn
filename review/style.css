@@ -247,6 +247,41 @@ button {
   background: var(--gone-wash);
 }
 
+.waits {
+  margin: 0 0 24px;
+  padding: 10px 14px;
+  background: var(--brass-wash);
+}
+
+.waits-head {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.waits ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.waits .seq {
+  font: 12px var(--mono);
+  color: var(--soft);
+}
+
+.points-to {
+  margin: 8px 0 20px 18px;
+}
+
+.points-head {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--soft);
+}
+
+.points-head b {
+  font: 600 13px var(--mono);
+}
+
 h2.table-name {
   font: 600 13px var(--mono);
   color: var(--soft);
@@ -358,6 +393,15 @@ th {
 .grid th.seq {
   color: var(--soft);
   text-decoration: none;
+}
+
+.grid.context td,
+.grid.context th {
+  background: var(--faint);
+}
+
+.grid.context .absent-row td {
+  background: var(--gone-wash);
 }
 
 .chip {

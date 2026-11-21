@@ -165,7 +165,11 @@ export async function run(argv: string[], io: Io): Promise<number> {
     }
     const extent = await keyturn.extent(id);
     const rows = await keyturn.diff(id, page);
-    return { proposal, extent, rows };
+    const references = await keyturn.refersTo(id, page);
+    // Only an approver is told why a proposal waits.
+    const waits =
+      proposal.status === "pending" ? await keyturn.waitsBecause(id).catch(() => []) : [];
+    return { proposal, extent, rows, references, waits };
   };
 
   try {
@@ -215,7 +219,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
       }
       case "show": {
         const all = await shown(await named(db, need("a proposal")));
-        print(all, renderProposal(all.proposal, all.extent, all.rows, style));
+        print(all, renderProposal(all.proposal, all.extent, all.rows, style, all));
         return 0;
       }
       case "approve": {
@@ -228,7 +232,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
             );
           }
           const all = await shown(id);
-          io.out(renderProposal(all.proposal, all.extent, all.rows, style));
+          io.out(renderProposal(all.proposal, all.extent, all.rows, style, all));
           io.out("");
           const total = all.proposal.changes;
           const onScreen = all.rows.length;

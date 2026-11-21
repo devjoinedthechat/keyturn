@@ -66,6 +66,32 @@ export interface Extent {
   rows: number;
 }
 
+/**
+ * A row that a proposal's row points to through a foreign key, as it is at the moment of
+ * asking. It is not part of what an approval names.
+ */
+export interface Reference {
+  /** The change it belongs to. */
+  seq: number;
+  /** The foreign key's name. */
+  via: string;
+  table: string;
+  /** The pointing columns and their values, as PostgreSQL writes them. */
+  key: Record<string, string | null>;
+  /** `missing`: no such row that this login's policies let through. `unreadable`: this login may not read the table. */
+  state: "shown" | "missing" | "unreadable";
+  columns: { column: string; value: string | null; kind: Kind }[];
+}
+
+/** One reason a waiting proposal has come to a person. */
+export interface Waiting {
+  /** The change it is about, or null when it is about the whole proposal. */
+  seq: number | null;
+  /** The rule that did not cover the change, or null when no rule is in question. */
+  rule: string | null;
+  because: string;
+}
+
 export interface Step {
   event: "opened" | "approved" | "approved_by_rule" | "rejected" | "applied" | "stale" | "failed";
   /** The login that did it. */
@@ -196,6 +222,49 @@ export class Keyturn {
       row.columns.push(column);
     }
     return result;
+  }
+
+  /**
+   * The rows a proposal's rows point to through foreign keys, for `count` changes starting
+   * at change `from`. Read with this login's rights, as they are now.
+   */
+  async refersTo(
+    id: string,
+    options: { from?: number; count?: number } = {},
+  ): Promise<Reference[]> {
+    const rows = await this.run<{
+      seq: number;
+      via: string;
+      table: string;
+      key: Record<string, string | null>;
+      state: Reference["state"];
+      column: string | null;
+      value: string | null;
+      kind: Kind | null;
+    }>(
+      `select seq, via, relation as "table",
+              (select jsonb_object_agg(part.key, part.value #>> '{}') from jsonb_each(r.key) as part) as key,
+              state, column_name as "column", value, kind
+         from keyturn.refers_to($1, $2, $3) as r`,
+      [id, options.from ?? 1, options.count ?? 100],
+    );
+    const result: Reference[] = [];
+    for (const { seq, via, table, key, state, column, value, kind } of rows) {
+      let reference = result.at(-1);
+      if (reference?.seq !== seq || reference.via !== via) {
+        reference = { seq, via, table, key, state, columns: [] };
+        result.push(reference);
+      }
+      if (column !== null && kind !== null) {
+        reference.columns.push({ column, value, kind });
+      }
+    }
+    return result;
+  }
+
+  /** Why a waiting proposal has come to a person. For an approver; nothing for a proposal that is decided. */
+  async waitsBecause(id: string): Promise<Waiting[]> {
+    return this.run<Waiting>("select seq, rule, because from keyturn.waits_because($1)", [id]);
   }
 
   /** What has happened to a proposal, in order, from the audit log. */

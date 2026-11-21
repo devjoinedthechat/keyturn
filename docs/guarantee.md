@@ -71,6 +71,7 @@ Every step of a proposal is an entry in `keyturn.audit`: opened, approved, appro
 - **The database owner and superusers.** They can do anything. Nothing should connect as them at run time.
 - **An agent given the owner's credentials.** Then it is not connected through Keyturn.
 - **An approver who approves without reading.** Keyturn puts the rows in front of a person. It cannot make them look.
+- **The rows shown beside a proposal.** The rows a proposal points to, and why it waits, are read when asked for. They are not in the hash an approval names, and may have changed by the time the change is written. A rule is read then; they are not.
 - **Effects outside the database.** Emails, payments, calls to other services.
 - **Row-level security as a limit on what may be proposed.** Policies decide which rows an agent can see and name. They do not check the row an agent proposes to insert, or what it proposes a row should become: the approver does. A rule on such a table needs a condition that does the same.
 - **What a table's cascades do to other tables.** The approved rows are checked after the write. Rows a cascade changes elsewhere are that table's own design.

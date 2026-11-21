@@ -9,12 +9,14 @@ export {
   type Outcome,
   type Proposal,
   type Queryable,
+  type Reference,
   Refused,
   type RowDiff,
   refusalOf,
   type Status,
   type Step,
   Undecided,
+  type Waiting,
 } from "./keyturn.ts";
 export { type Review, serveReview } from "./review.ts";
 export { serveTools } from "./tools.ts";

@@ -15,7 +15,11 @@ const state = {
   proposal: null,
   extent: [],
   history: [],
+  // Why the open proposal has come to a person, for an approver.
+  waits: [],
   rows: [],
+  // The rows that the rows on the page point to through foreign keys, as they were when read.
+  references: [],
   // The hash of the content whose rows are on the screen. An approval sends this one. Null
   // when the content changed after it was read: there is then nothing on the screen to approve.
   readHash: null,
@@ -375,6 +379,30 @@ function drawSheet() {
     ),
   );
 
+  if (state.waits.length > 0) {
+    parts.push(
+      el(
+        "div",
+        { class: "waits" },
+        el("p", { class: "waits-head" }, "Why this has come to a person"),
+        el(
+          "ul",
+          {},
+          ...state.waits.map((wait) =>
+            el(
+              "li",
+              {},
+              wait.seq === null ? null : el("span", { class: "seq" }, `#${wait.seq}`),
+              wait.seq === null ? null : " ",
+              ...(wait.rule === null ? [] : ["the rule ", el("b", {}, written(wait.rule)), " "]),
+              written(wait.because),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   // One entry says only that it was proposed, which the line above already says.
   if (state.history.length > 1) {
     parts.push(
@@ -449,7 +477,7 @@ function drawRows() {
       parts.push(el("h2", { class: "table-name" }, el("b", {}, written(table))));
     }
     if (row.operation === "update") {
-      parts.push(drawUpdate(row));
+      parts.push(drawUpdate(row), ...drawPointsTo([row.seq]));
       index += 1;
       continue;
     }
@@ -461,10 +489,116 @@ function drawRows() {
     ) {
       end += 1;
     }
-    parts.push(drawGrid(state.rows.slice(index, end), row.operation));
+    parts.push(
+      drawGrid(state.rows.slice(index, end), row.operation),
+      ...drawPointsTo(state.rows.slice(index, end).map((each) => each.seq)),
+    );
     index = end;
   }
   return parts;
+}
+
+/**
+ * The rows that some changes point to through foreign keys: one table for each table
+ * pointed to, and one line for each row of it, with the changes that point there.
+ *
+ * These are read when the page asks, with the reviewer's own rights. They are no part of
+ * what an approval names, and the page says so beside each.
+ */
+function drawPointsTo(seqs) {
+  const wanted = new Set(seqs);
+  const tables = new Map();
+  for (const reference of state.references) {
+    if (!wanted.has(reference.seq)) {
+      continue;
+    }
+    const lines = tables.get(reference.table) ?? new Map();
+    tables.set(reference.table, lines);
+    const id = JSON.stringify([reference.via, reference.key]);
+    const line = lines.get(id) ?? { reference, seqs: [] };
+    lines.set(id, line);
+    line.seqs.push(reference.seq);
+  }
+  return [...tables].map(([table, lines]) => {
+    const columns = [];
+    for (const { reference } of lines.values()) {
+      for (const column of reference.columns) {
+        if (!columns.includes(column.column)) {
+          columns.push(column.column);
+        }
+      }
+    }
+    return el(
+      "section",
+      { class: "points-to" },
+      el(
+        "p",
+        { class: "points-head" },
+        "Points to ",
+        el("b", {}, written(table)),
+        " ",
+        el("span", { class: "chip" }, "as it is now, and no part of what is approved"),
+      ),
+      el(
+        "div",
+        {
+          class: "scroll",
+          tabindex: "0",
+          role: "group",
+          "aria-label": `${many(lines.size, "row")} pointed to`,
+        },
+        el(
+          "table",
+          { class: "grid context" },
+          el(
+            "thead",
+            {},
+            el(
+              "tr",
+              {},
+              el("th", { class: "seq", scope: "col" }, "#"),
+              el("th", { scope: "col" }, "pointed to by"),
+              ...columns.map((name) => el("th", { scope: "col" }, written(name))),
+            ),
+          ),
+          el(
+            "tbody",
+            {},
+            ...[...lines.values()].map(({ reference, seqs: from }) =>
+              el(
+                "tr",
+                { class: reference.state === "shown" ? "" : "absent-row" },
+                el("td", { class: "seq" }, from.join(", ")),
+                el("td", {}, keyParts(reference.key)),
+                ...(reference.state === "shown"
+                  ? columns.map((name) => {
+                      const column = reference.columns.find(
+                        (candidate) => candidate.column === name,
+                      );
+                      return el(
+                        "td",
+                        {},
+                        column === undefined
+                          ? value(null, "absent")
+                          : value(column.value, column.kind),
+                      );
+                    })
+                  : [
+                      el(
+                        "td",
+                        { colspan: String(Math.max(columns.length, 1)) },
+                        reference.state === "missing"
+                          ? "There is no such row."
+                          : "This login may not read that table.",
+                      ),
+                    ]),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
 }
 
 /** A row's key, each part apart from the next, so that a comma inside a value is not read as the end of it. */
@@ -927,6 +1061,8 @@ async function open(id) {
   state.id = id;
   state.proposal = null;
   state.rows = [];
+  state.references = [];
+  state.waits = [];
   state.readHash = null;
   state.mode = "idle";
   state.refused = null;
@@ -948,7 +1084,9 @@ async function open(id) {
     state.proposal = head.proposal;
     state.extent = head.extent;
     state.history = head.history;
+    state.waits = head.waits ?? [];
     state.rows = page.rows;
+    state.references = page.references ?? [];
     // The rows came with the hash of the content they belong to. If the proposal has another by now, nothing here is approvable.
     state.readHash = page.contentHash === head.proposal.contentHash ? page.contentHash : null;
   } catch (problem) {
@@ -986,6 +1124,7 @@ async function more(count) {
       state.readHash = null;
     } else {
       state.rows.push(...page.rows);
+      state.references.push(...(page.references ?? []));
     }
   }
   const top = sheet.scrollTop;
@@ -1020,6 +1159,7 @@ async function refresh() {
   state.proposal = head.proposal;
   state.extent = head.extent;
   state.history = head.history;
+  state.waits = head.waits ?? [];
   state.mode = "idle";
   const top = sheet.scrollTop;
   drawSheet();

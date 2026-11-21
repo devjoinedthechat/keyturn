@@ -136,6 +136,18 @@ select keyturn.forbid(
 
 If the database connection is lost, the command says so and exits with 1, and the page tells the reviewer it has lost contact. Start it again. `keyturn tools` does the same, so that whatever runs it can restart it.
 
+## What the approver is shown beside the rows
+
+| Shown                       | From                              | Who sees it                                      |
+| --------------------------- | --------------------------------- | ------------------------------------------------ |
+| Why it has come to a person | `keyturn.waits_because(proposal)` | An approver. An agent may not read the rules     |
+| The rows its rows point to  | `keyturn.refers_to(proposal)`     | Whoever may read those rows, by their own rights |
+
+- A row is followed through each foreign key of its table, one step. Declare the foreign key and the row it names is shown; a link kept only by convention is not.
+- A row pointed to that does not exist, or that the reader's policies keep from them, is shown as missing. A table the reader may not read is shown as unreadable. Grant the approver `select` on the tables a decision rests on.
+- Both are read when asked for and may be different a moment later. They are no part of what an approval names. What must hold when the change is written belongs in a rule.
+- At most twenty changes are explained. A reason true of the whole proposal, such as holding more rows than a rule lets through, is given once.
+
 ## Moving to a later version
 
 Version 0.1 installs into a database that does not have Keyturn, and refuses one that does. To move to a later version, uninstall and install. Proposals and the audit log are removed with it, so record the audit head and export `keyturn.audit` first if the record matters.
