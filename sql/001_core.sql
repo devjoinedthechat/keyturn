@@ -146,6 +146,17 @@ create function keyturn.audit_hash(p_prev text, p_proposal uuid, p_at timestampt
              || '|' || p_actor || '|' || p_event || '|' || p_detail::text, 'UTF8')), 'hex')
   $$;
 
+-- What the owner may set for the whole of Keyturn in this database. One row.
+create table keyturn.settings (
+  only_one boolean primary key default true check (only_one),
+  -- Whether each step of a proposal is said on the PostgreSQL channel "keyturn". Saying it
+  -- makes the step depend on the server's notification queue, which any login of the server
+  -- can fill, and a step that says something cannot be part of a two-phase transaction. An
+  -- owner for whom either matters switches it off: update keyturn.settings set announce = false.
+  announce boolean not null default true
+);
+insert into keyturn.settings default values;
+
 -- Adds an entry. Called only by Keyturn's own functions, which hold the proposal's row
 -- while they do, so a proposal's entries have one order.
 create function keyturn.audit_append(p_proposal uuid, p_event text, p_detail jsonb default '{}') returns void
@@ -165,7 +176,12 @@ begin
   -- transaction is kept: a proposal should not wait for somebody to think of looking. It
   -- says which proposal and what happened, and nothing of what the proposal holds. Any login
   -- of the database may listen.
-  perform pg_notify('keyturn', jsonb_build_object('event', p_event, 'proposal', p_proposal)::text);
+  --
+  -- What is said is a hint and no more: anyone may say anything on a channel. Whoever hears
+  -- it reads the entry itself from the log.
+  if (select announce from keyturn.settings) then
+    perform pg_notify('keyturn', jsonb_build_object('event', p_event, 'proposal', p_proposal)::text);
+  end if;
 end $$;
 
 -- Rules for changes that need no person. There are none unless the tables' owner writes
@@ -1131,6 +1147,8 @@ grant usage on schema keyturn to keyturn_agent, keyturn_approver;
 grant select on keyturn.proposals, keyturn.changes, keyturn.protected, keyturn.audit to keyturn_agent, keyturn_approver;
 -- An approver may read the rules: they decide what never reaches an approver.
 grant select on keyturn.rules, keyturn.forbidden to keyturn_approver;
+-- Whether steps are said aloud is no secret: a watcher has to know it will hear nothing.
+grant select on keyturn.settings to keyturn_agent, keyturn_approver;
 grant execute on function keyturn.propose(jsonb, text, interval), keyturn.record_proposal(jsonb, text, interval) to keyturn_agent;
 grant execute on function keyturn.apply(uuid) to keyturn_agent, keyturn_approver;
 grant execute on function keyturn.approve(uuid, text), keyturn.reject(uuid, text) to keyturn_approver;

@@ -7,7 +7,8 @@ import { type Queryable, Refused, refusalOf } from "./keyturn.ts";
 /**
  * An archive file is lines of JSON. The first says what the file holds. Each line after it
  * is one proposal: its row, the exact text its hash was made from, and its entries in the
- * audit log. The last line carries the hash of every line between.
+ * audit log, and what each change wrote where that was kept. The last line carries the hash
+ * of every line before it.
  */
 export interface ArchiveHead {
   keyturn: "archive";
@@ -21,7 +22,7 @@ export interface ArchiveHead {
 
 /** What a written or checked archive is: its first line, and the hash of the file's body. */
 export interface Archive extends ArchiveHead {
-  /** The hash of every proposal line. Kept with the mark the removal leaves in the database. */
+  /** The hash of every line but the last. Kept with the mark the removal leaves in the database. */
   file: string;
 }
 
@@ -45,6 +46,13 @@ const sha256 = (text: string) => createHash("sha256").update(text, "utf8").diges
  * The file is read from one view of the data, so it is whole. It must not exist yet.
  */
 export async function writeArchive(db: Queryable, before: Date, path: string): Promise<Archive> {
+  // It is read inside one transaction, and a pool would give each statement another connection.
+  if (typeof (db as { totalCount?: unknown }).totalCount === "number") {
+    throw new Refused(
+      "an archive is written over one connection, not a pool: give a client checked out of it",
+      null,
+    );
+  }
   let file: Awaited<ReturnType<typeof open>>;
   try {
     // "wx": made new, or not at all. An archive is never written over another.
@@ -66,7 +74,11 @@ export async function writeArchive(db: Queryable, before: Date, path: string): P
       )
     ).rows[0] as { proposals: number; entries: number; digest: string };
     const head: ArchiveHead = { keyturn: "archive", before: before.toISOString(), ...found };
-    await file.write(`${JSON.stringify(head)}\n`);
+    const body = createHash("sha256");
+    const first = `${JSON.stringify(head)}\n`;
+    // The first line is under the file's hash too: what the file says it holds cannot be altered.
+    body.update(first, "utf8");
+    await file.write(first);
 
     const ids = (
       await db.query(
@@ -76,13 +88,15 @@ export async function writeArchive(db: Queryable, before: Date, path: string): P
         [before],
       )
     ).rows.map((row) => (row as { id: string }).id);
-    const body = createHash("sha256");
     for (let from = 0; from < ids.length; from += 100) {
       const { rows } = await db.query(
         `select jsonb_build_object(
                   'proposal', to_jsonb(p),
                   -- The text the proposal's hash is the hash of, exactly as PostgreSQL wrote it.
                   'content_text', keyturn.content_of(p.id),
+                  -- What each change wrote, where that was kept: taking one back was held against it.
+                  'written', coalesce((select jsonb_agg(jsonb_build_object('seq', c.seq, 'as_written', c.as_written) order by c.seq)
+                                         from keyturn.changes c where c.proposal_id = p.id and c.as_written is not null), '[]'),
                   'audit', coalesce((select jsonb_agg(jsonb_build_object(
                                         'seq', a.seq::text, 'proposal_id', a.proposal_id,
                                         'at_text', to_char(a.at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US'),
@@ -162,23 +176,35 @@ export async function verifyArchive(path: string): Promise<Archive> {
       }
       if (head === null) {
         head = parsed as ArchiveHead;
-        if (head.keyturn !== "archive" || typeof head.digest !== "string") {
+        if (head?.keyturn !== "archive" || typeof head.digest !== "string") {
           throw wrong("its first line does not say what it is");
         }
+        body.update(`${line}\n`, "utf8");
         continue;
       }
-      if ((parsed as { keyturn?: string }).keyturn === "end") {
+      if ((parsed as { keyturn?: string } | null)?.keyturn === "end") {
         end = String((parsed as { file?: unknown }).file);
         continue;
       }
       body.update(`${line}\n`, "utf8");
-      const one = parsed as { proposal?: { id?: string }; content_text?: string; audit?: Entry[] };
+      const one = (parsed ?? {}) as {
+        proposal?: { id?: string };
+        content_text?: string;
+        audit?: Entry[];
+      };
       if (typeof one.proposal?.id !== "string" || !Array.isArray(one.audit)) {
         throw wrong("a line of it is not a proposal with its entries");
+      }
+      // Every proposal's record begins with its being made. One without has lost its beginning.
+      if (one.audit[0]?.event !== "opened") {
+        throw wrong(`the record of proposal ${one.proposal.id} does not begin where it was made`);
       }
       proposals += 1;
       let previous = "";
       for (const entry of one.audit) {
+        if (typeof entry?.seq !== "string" || !/^[0-9]{1,18}$/.test(entry.seq)) {
+          throw wrong("an entry of it has no number");
+        }
         if (entry.proposal_id !== one.proposal.id) {
           throw wrong(`entry ${entry.seq} is filed under another proposal`);
         }

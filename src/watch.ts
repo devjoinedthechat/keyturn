@@ -4,6 +4,8 @@ import { plain } from "./render.ts";
 /** What happened to a proposal, as it is told to whoever watches. */
 export interface Told {
   event: string;
+  /** Who did it, as the audit log has it. */
+  by: string;
   proposal: {
     id: string;
     status: Proposal["status"];
@@ -34,22 +36,41 @@ export async function watch(
   fault: (error: unknown) => void = () => {},
 ): Promise<void> {
   const keyturn = new Keyturn(db);
-  db.heard((channel, payload) => {
-    if (channel !== "keyturn") {
-      return;
-    }
-    void (async () => {
-      const said = JSON.parse(payload) as { event?: unknown; proposal?: unknown };
-      if (typeof said.event !== "string" || typeof said.proposal !== "string") {
-        return;
+  // Anyone who can connect can say anything on the channel, an agent too. So what is heard
+  // is never believed, and not even read: it is only a reason to look. What is told is read
+  // from the audit log, which nobody but Keyturn writes, and each entry of it is told once.
+  //
+  // Entries get their numbers before their transactions are kept, so a lower number can
+  // appear after a higher one. Each look therefore goes back over the last numbers too, and
+  // the ones already seen are remembered.
+  const seen = new Set<bigint>();
+  let highest = 0n;
+  const look = async (silent: boolean) => {
+    const from = highest > BEHIND ? highest - BEHIND : 0n;
+    const { rows } = await db.query(
+      "select seq::text as seq, proposal_id::text as proposal, event, actor::text as actor from keyturn.audit where seq > $1 order by seq",
+      [from.toString()],
+    );
+    for (const entry of rows as { seq: string; proposal: string; event: string; actor: string }[]) {
+      const seq = BigInt(entry.seq);
+      if (seen.has(seq)) {
+        continue;
       }
-      const proposal = await keyturn.proposal(said.proposal);
+      seen.add(seq);
+      if (seq > highest) {
+        highest = seq;
+      }
+      if (silent || !(entry.event in words)) {
+        continue;
+      }
+      const proposal = await keyturn.proposal(entry.proposal);
       // One this login may not see: an agent watching hears only of its own.
       if (proposal === null) {
-        return;
+        continue;
       }
       await tell({
-        event: said.event,
+        event: entry.event,
+        by: entry.actor,
         proposal: {
           id: proposal.id,
           status: proposal.status,
@@ -60,10 +81,43 @@ export async function watch(
           extent: await keyturn.extent(proposal.id),
         },
       });
-    })().catch(fault);
+    }
+    for (const seq of seen) {
+      if (seq + BEHIND < highest) {
+        seen.delete(seq);
+      }
+    }
+  };
+  // However much is said, one look is at work and at most one more is owed: a flood of
+  // messages costs a flood of nothing.
+  let looking = false;
+  let again = false;
+  const heard = () => {
+    if (looking) {
+      again = true;
+      return;
+    }
+    looking = true;
+    void (async () => {
+      do {
+        again = false;
+        await look(false).catch(fault);
+      } while (again);
+      looking = false;
+    })();
+  };
+  db.heard((channel) => {
+    if (channel === "keyturn") {
+      heard();
+    }
   });
+  // Listening first, then what is already there: a step kept between the two is still told.
   await db.query("listen keyturn");
+  await look(true);
 }
+
+/** How far back each look goes for an entry whose transaction was kept late. */
+const BEHIND = 2000n;
 
 const words: Record<string, string> = {
   opened: "proposed",
@@ -85,13 +139,15 @@ export function line(told: Told): string {
         `${part.rows.toLocaleString("en")} ${part.operation}${part.rows === 1 ? "" : "s"} in ${plain(part.table)}`,
     )
     .join(", ");
-  const who =
-    told.event === "opened" || proposal.decidedBy === null || told.event === "applied"
-      ? plain(proposal.proposedBy)
-      : plain(proposal.decidedBy);
+  const who = plain(told.by);
   const note =
     proposal.note === "" ? "" : `: ${plain(proposal.note).replace(/\s+/g, " ").slice(0, 200)}`;
-  return `${proposal.id.slice(0, 8)} ${words[told.event] ?? told.event} by ${who}, ${size}${told.event === "opened" ? note : ""}`;
+  return `${plain(proposal.id).slice(0, 8)} ${words[told.event] ?? plain(told.event)} by ${who}, ${size}${told.event === "opened" ? note : ""}`;
+}
+
+/** The line as Slack takes it: its three marks of its own made plain, so a note cannot make a link or call a channel. */
+export function forSlack(text: string): string {
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
 /** Sends one thing to an address that takes JSON by POST. A refusal or no answer in ten seconds is an error. */

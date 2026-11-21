@@ -79,7 +79,18 @@ export async function install(db: Queryable): Promise<{ version: string }> {
 }
 
 /** What Keyturn keeps: carried over, row for row, when it moves to a later version. */
-const kept = ["proposals", "changes", "audit", "rules", "forbidden", "archived"] as const;
+const kept = [
+  "proposals",
+  "changes",
+  "audit",
+  "rules",
+  "forbidden",
+  "archived",
+  "settings",
+] as const;
+/** The tables among them that number their own rows, and must go on from where they were. */
+const numbered = ["audit", "archived"] as const;
+const own = "nspname in ('keyturn', 'proposal')";
 
 /** Whether one version comes after another: 0.10.0 after 0.9.2. */
 function later(one: string, other: string): boolean {
@@ -133,11 +144,136 @@ export async function upgrade(db: Queryable): Promise<{ from: string; to: string
       )
     ).rows.map((row) => (row as { name: string }).name);
 
+  // Only the login that owns Keyturn moves it. Anyone else who could, a superuser say, would
+  // become the owner of every function in it, and those functions run with their owner's rights.
+  const owned = (
+    await db.query(
+      `select pg_get_userbyid(n.nspowner)::text as owner, pg_get_userbyid(n.nspowner) = current_user as mine
+         from pg_namespace n where n.nspname = 'keyturn'`,
+    )
+  ).rows[0] as { owner: string; mine: boolean };
+  if (!owned.mine) {
+    throw new Refused(
+      `keyturn in this database belongs to ${owned.owner}. Connect as that login to move it`,
+      "42501",
+    );
+  }
+
   await db.query("begin");
   try {
     // Nothing moves while this runs.
     await db.query(
       "lock table keyturn.proposals, keyturn.changes, keyturn.audit, keyturn.protected in access exclusive mode",
+    );
+    // Replacing Keyturn's objects takes with it whatever of the owner's own hangs on them: a
+    // view of the audit log, a foreign key to a proposal, a policy that asks keyturn.caller_is.
+    // Losing a policy unnoticed would let an agent read what it could not. So none of it is
+    // dropped: the move is refused, and they are named.
+    const hanging = (
+      await db.query(
+        `with mine as (
+           select 'pg_class'::regclass::oid as classid, c.oid as objid from pg_class c
+            where c.relnamespace in (select oid from pg_namespace where ${own})
+           union all
+           select 'pg_proc'::regclass::oid, p.oid from pg_proc p
+            where p.pronamespace in (select oid from pg_namespace where ${own})
+           union all
+           select 'pg_type'::regclass::oid, t.oid from pg_type t
+            where t.typnamespace in (select oid from pg_namespace where ${own})
+           union all
+           select 'pg_namespace'::regclass::oid, n.oid from pg_namespace n where ${own}
+         ),
+         hung as (
+           select distinct d.classid, d.objid, i.type, i.identity,
+                  -- The schema of the thing itself or, for what sits on a table (a policy, a
+                  -- trigger, a view's rule, a default), of that table. Read from the catalog:
+                  -- a name can be made to say anything.
+                  coalesce(i.schema, (
+                    select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                     where c.oid = case d.classid
+                       when 'pg_policy'::regclass then (select polrelid from pg_policy where oid = d.objid)
+                       when 'pg_trigger'::regclass then (select tgrelid from pg_trigger where oid = d.objid)
+                       when 'pg_rewrite'::regclass then (select ev_class from pg_rewrite where oid = d.objid)
+                       when 'pg_attrdef'::regclass then (select adrelid from pg_attrdef where oid = d.objid)
+                       when 'pg_constraint'::regclass then (select conrelid from pg_constraint where oid = d.objid)
+                     end)) as home
+             from pg_depend d
+             join mine on d.refclassid = mine.classid and d.refobjid = mine.objid
+             cross join lateral pg_identify_object(d.classid, d.objid, d.objsubid) as i
+            where d.deptype in ('n', 'a')
+              and (d.classid, d.objid) not in (select classid, objid from mine)
+         )
+         select distinct type || ' ' || identity as what from hung
+          where home is distinct from 'keyturn' and home is distinct from 'proposal'
+            -- What a session made for itself goes with the session, and is not the owner's to drop.
+            and coalesce(home, '') !~ '^pg_(toast_)?temp'
+          order by 1`,
+      )
+    ).rows
+      // A view hangs on what it reads by its rewrite rule. It is named as the view it is.
+      // Names are other people's words: kept on one line.
+      .map((row) =>
+        (row as { what: string }).what
+          .replace(/^rule "?_RETURN"? on /, "view ")
+          .replace(/\s+/g, " "),
+      );
+    if (hanging.length > 0) {
+      throw new Refused(
+        `these depend on keyturn's own tables or functions and would be dropped with them: ${hanging.slice(0, 40).join("; ")}${hanging.length > 40 ? `; and ${hanging.length - 40} more` : ""}. Drop them, run keyturn upgrade, and make them again`,
+        null,
+      );
+    }
+    const granted = (
+      await db.query(
+        `select distinct case when given.grantee = 0 then 'everyone (public)' else pg_get_userbyid(given.grantee)::text end as role
+           from (
+           select (aclexplode(nspacl)).grantee from pg_namespace where ${own}
+           union all
+           select (aclexplode(c.relacl)).grantee from pg_class c
+            where c.relnamespace in (select oid from pg_namespace where ${own})
+           union all
+           select (aclexplode(a.attacl)).grantee from pg_attribute a join pg_class c on c.oid = a.attrelid
+            where c.relnamespace in (select oid from pg_namespace where ${own})
+           union all
+           select (aclexplode(p.proacl)).grantee from pg_proc p
+            where p.pronamespace in (select oid from pg_namespace where ${own})
+         ) as given
+          where (given.grantee = 0 or pg_get_userbyid(given.grantee)::text <> all ($1::text[] || current_user::text))
+            -- A role the owner's default privileges give rights to gets them on every new
+            -- table, and will again: nothing of theirs is lost.
+            and given.grantee not in (select (aclexplode(defaclacl)).grantee from pg_default_acl
+                                       where defaclrole = (select oid from pg_roles where rolname = current_user)
+                                         and defaclnamespace = 0)
+          order by 1`,
+        [roles],
+      )
+    ).rows.map((row) => (row as { role: string }).role.replace(/\s+/g, " "));
+    if (granted.length > 0) {
+      throw new Refused(
+        `rights on keyturn's own tables or functions were given by hand to ${granted.join(", ")}, and would be lost. Revoke them, run keyturn upgrade, and give them again`,
+        null,
+      );
+    }
+    // Where each numbered table had got to. Entries that were put away still have their numbers.
+    const reached = new Map<string, string>();
+    for (const table of numbered) {
+      const sequence = (
+        await db.query(
+          "select case when to_regclass($1) is not null then pg_get_serial_sequence($1, 'seq') end as name",
+          [`keyturn.${table}`],
+        )
+      ).rows[0] as { name: string | null };
+      if (sequence.name !== null) {
+        const at = (
+          await db.query(
+            `select (case when is_called then last_value else last_value - 1 end)::text as last from ${sequence.name}`,
+          )
+        ).rows[0] as { last: string };
+        reached.set(table, at.last);
+      }
+    }
+    await db.query(
+      "create temp table keyturn_kept_protected on commit drop as select * from keyturn.protected",
     );
     const before = (await db.query("select entries::text, head from keyturn.audit_head()"))
       .rows[0] as { entries: string; head: string };
@@ -173,12 +309,26 @@ export async function upgrade(db: Queryable): Promise<{ from: string; to: string
         await db.query("select keyturn.protect($1::oid::regclass, $2)", [table.oid, table.exact]);
       }
     }
+    // Put under Keyturn again, not looked at afresh: a table whose columns changed since it was
+    // protected still says so, and a view its owner took away stays away.
+    await db.query(
+      `update keyturn.protected p set shape = k.shape, added_at = k.added_at
+         from keyturn_kept_protected k where k.relation = p.relation`,
+    );
+    await db.query(
+      `select keyturn.drop_view(k.relation) from keyturn_kept_protected k
+        where k.view is null and exists (select from keyturn.protected p where p.relation = k.relation)`,
+    );
     for (const table of kept) {
       const had = columns.get(table);
       if (had === undefined) {
         continue;
       }
       const now = await names("keyturn", table);
+      if (table === "settings") {
+        // The new version made its one row. The owner's own takes its place.
+        await db.query("delete from keyturn.settings");
+      }
       const both = had
         .filter((name) => now.includes(name))
         .map((name) => `"${name.replaceAll('"', '""')}"`);
@@ -187,9 +337,18 @@ export async function upgrade(db: Queryable): Promise<{ from: string; to: string
            select ${both.join(", ")} from keyturn_kept_${table}`,
       );
     }
-    await db.query(
-      "select setval(pg_get_serial_sequence('keyturn.audit', 'seq'), greatest((select max(seq) from keyturn.audit), 1), (select count(*) > 0 from keyturn.audit))",
-    );
+    for (const table of numbered) {
+      const last = reached.get(table);
+      if (last !== undefined) {
+        // On from the highest number ever given, kept or put away: a number is never used twice.
+        await db.query(
+          `select setval(pg_get_serial_sequence('keyturn.${table}', 'seq'),
+                         greatest($1::bigint, (select coalesce(max(seq), 0) from keyturn.${table}), 1),
+                         greatest($1::bigint, (select coalesce(max(seq), 0) from keyturn.${table})) > 0)`,
+          [last],
+        );
+      }
+    }
 
     const after = (await db.query("select entries::text, head from keyturn.audit_head()"))
       .rows[0] as { entries: string; head: string };

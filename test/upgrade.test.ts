@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import type pg from "pg";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { installed, Keyturn, upgrade, version } from "../src/index.ts";
-import { Database, logins, refusal } from "./database.ts";
+import { administrator, Database, logins, refusal } from "./database.ts";
 
 /**
  * A database is given Keyturn as it was at version 0.1.0, from the SQL of that version kept
@@ -241,6 +241,100 @@ describe("a move that cannot be finished", () => {
     expect((await owner.query("select count(*)::int as n from keyturn.protected")).rows[0].n).toBe(
       3,
     );
+    await database.close();
+  });
+});
+
+describe("a move that would lose something of the owner's", () => {
+  test("is refused, and names it; and is only the owner's to make", async () => {
+    const { database, owner } = await asItWas();
+    const admin = await administrator(database);
+    const said = async () => (await refusal(upgrade(owner)))?.message ?? "moved";
+
+    // A superuser who moved it would come to own every function in it.
+    expect((await refusal(upgrade(admin)))?.message).toContain(`belongs to ${logins.owner}`);
+
+    await owner.query("create view audit_copy as select * from keyturn.audit");
+    expect(await said()).toContain("view public.audit_copy");
+    await owner.query("drop view audit_copy");
+
+    await owner.query(
+      "create table tickets (id integer primary key, proposal uuid references keyturn.proposals (id))",
+    );
+    expect(await said()).toContain("tickets_proposal_fkey on public.tickets");
+    await owner.query("drop table tickets");
+
+    // The one that matters most: a policy that would be gone, and the rows behind it open.
+    await owner.query(`
+      create table salaries (id integer primary key, amount integer);
+      alter table salaries enable row level security;
+      create policy approvers_only on salaries using (keyturn.caller_is('keyturn_approver'));
+    `);
+    expect(await said()).toContain("approvers_only on public.salaries");
+    await owner.query("drop policy approvers_only on salaries");
+
+    await admin.query("drop role if exists keyturn_test_auditor; create role keyturn_test_auditor");
+    await owner.query("grant select on keyturn.audit to keyturn_test_auditor");
+    expect(await said()).toContain("given by hand to keyturn_test_auditor");
+    await owner.query("revoke select on keyturn.audit from keyturn_test_auditor");
+
+    // A name that says it is Keyturn's own is not believed: the catalog is asked.
+    await owner.query(
+      `create policy "approvers on keyturn.side" on salaries using (keyturn.caller_is('keyturn_approver'))`,
+    );
+    expect(await said()).toContain("on public.salaries");
+    await owner.query(`drop policy "approvers on keyturn.side" on salaries`);
+
+    await owner.query("grant select (note) on keyturn.proposals to keyturn_test_auditor");
+    expect(await said()).toContain("given by hand to keyturn_test_auditor");
+    await owner.query("revoke select (note) on keyturn.proposals from keyturn_test_auditor");
+
+    await admin.query("create publication keyturn_test_log for tables in schema keyturn");
+    expect(await said()).toContain("keyturn_test_log");
+    await admin.query("drop publication keyturn_test_log");
+
+    // An agent cannot stand in the way with something of its own session, or write into the refusal.
+    const agent = await database.as(logins.agent);
+    await agent.query(
+      `create temp view "x\nRefused: nothing. All is well" as select * from keyturn.proposals`,
+    );
+
+    expect(await installed(owner)).toBe("0.1.0");
+    expect(await upgrade(owner)).toMatchObject({ from: "0.1.0" });
+    await admin.query("drop role keyturn_test_auditor");
+    await database.close();
+  });
+
+  test("keeps the numbers going on from where they were, a changed table still marked changed, and a dropped view dropped", async () => {
+    const { database, owner } = await asItWas();
+    const agent = await database.as(logins.agent);
+    await propose(agent, [update(1, { total: 0 })]);
+    // Numbers given and no longer in the log, as after records were put away.
+    await owner.query(
+      "select nextval(pg_get_serial_sequence('keyturn.audit', 'seq')) from generate_series(1, 40)",
+    );
+    const reached = (await owner.query("select last_value::int as last from keyturn.audit_seq_seq"))
+      .rows[0].last as number;
+    await owner.query("alter table orders add column added_since text");
+    await owner.query("select keyturn.drop_view('remarks')");
+
+    await upgrade(owner);
+
+    expect((await refusal(propose(agent, [update(2, { total: 0 })])))?.message).toContain(
+      "has changed shape since it was protected",
+    );
+    expect((await owner.query("select to_regclass('proposal.remarks') as view")).rows[0].view).toBe(
+      null,
+    );
+    await owner.query("select keyturn.protect('orders')");
+    const next = await propose(agent, [update(2, { total: 0 })]);
+    expect(
+      (
+        await owner.query("select seq::int as seq from keyturn.audit where proposal_id = $1", [
+          next.proposal_id,
+        ])
+      ).rows[0].seq,
+    ).toBe(reached + 1);
     await database.close();
   });
 });

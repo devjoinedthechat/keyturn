@@ -4,7 +4,7 @@ import type pg from "pg";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { type Io, run } from "../src/cli.ts";
 import { Keyturn } from "../src/index.ts";
-import { Database, logins, propose } from "./database.ts";
+import { Database, logins, propose, refusal } from "./database.ts";
 
 const schema = `
   create table orders (id integer primary key, customer text not null, total numeric(10, 2) not null, status text not null default 'paid');
@@ -94,9 +94,109 @@ describe("what the database says aloud", () => {
       { event: "approved", proposal: made.proposal_id },
     ]);
   });
+
+  test("is silent when the owner has turned it off, and Keyturn works the same", async () => {
+    const owner = await database.as(logins.owner);
+    const listener = await database.as(logins.alice);
+    const heard: string[] = [];
+    listener.on("notification", (said) => heard.push(said.payload ?? ""));
+    await listener.query("listen keyturn");
+    await owner.query("update keyturn.settings set announce = false");
+    const quiet = await propose(agent, [update(50)]);
+    await owner.query("update keyturn.settings set announce = true");
+    const loud = await propose(agent, [update(51)]);
+    await until(() => heard.length >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(heard.map((payload) => JSON.parse(payload).proposal)).toEqual([loud.proposal_id]);
+    expect(quiet.proposal_id).toMatch(/^[0-9a-f-]{36}$/);
+    // Only the owner turns it off.
+    expect((await refusal(agent.query("update keyturn.settings set announce = false")))?.code).toBe(
+      "42501",
+    );
+  });
 });
 
 describe("keyturn watch", () => {
+  test("believes the audit log, and not what is said on the channel", async () => {
+    const watch = watching(logins.alice, []);
+    await until(() => watch.err.some((text) => text.startsWith("Watching.")));
+    const made = await new Keyturn(agent).propose([update(60)]);
+    await until(() => watch.out.length >= 1);
+
+    // Anyone who can connect can say anything there. An agent says its proposal was approved.
+    for (const forged of [
+      JSON.stringify({ event: "approved", proposal: made.id }),
+      JSON.stringify({ event: "\u001b[2J\u001b[H approved", proposal: made.id }),
+      JSON.stringify({ event: "approved", proposal: "'; drop table orders; --" }),
+      "not json at all",
+      "null",
+    ]) {
+      await agent.query("select pg_notify('keyturn', $1)", [forged]);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(watch.out).toHaveLength(1);
+    expect(watch.err.filter((text) => !text.startsWith("Watching."))).toEqual([]);
+
+    // And it is still listening, and tells what did happen once.
+    await new Keyturn(alice).reject(made.id, "No.");
+    await until(() => watch.out.length >= 2);
+    await agent.query("select pg_notify('keyturn', $1)", [
+      JSON.stringify({ event: "rejected", proposal: made.id }),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    watch.stop();
+    await watch.done;
+    expect(watch.out).toHaveLength(2);
+    expect(watch.out[1]).toContain("rejected by");
+    expect(watch.out.join("\n")).not.toContain("approved");
+  });
+
+  test("names who did each thing, tells what was kept late, and is not held up by a flood", async () => {
+    // Made before the watching starts, kept after it: still told.
+    const late = await database.as(logins.otherAgent);
+    await late.query("begin");
+    const early = await propose(late, [update(70)]);
+    const made = await new Keyturn(agent).propose([update(71)]);
+    const watch = watching(logins.alice, []);
+    await until(() => watch.err.some((text) => text.startsWith("Watching.")));
+    await late.query("commit");
+    await until(() => watch.out.some((text) => text.startsWith(early.proposal_id.slice(0, 8))));
+
+    // Twenty thousand messages from a login with no part in Keyturn.
+    await agent.query(
+      "select pg_notify('keyturn', json_build_object('proposal', gen_random_uuid())::text) from generate_series(1, 20000)",
+    );
+    const keyturn = new Keyturn(alice);
+    await keyturn.approve(made.id, made.contentHash);
+    await new Keyturn(agent).apply(made.id);
+    await keyturn.revert(made.id);
+    await until(() => watch.out.some((text) => text.includes("taken back")));
+    watch.stop();
+    await watch.done;
+    const mine = watch.out.filter((text) => text.startsWith(made.id.slice(0, 8)));
+    expect(mine.map((text) => text.split(",")[0])).toEqual([
+      `${made.id.slice(0, 8)} approved by ${logins.alice}`,
+      `${made.id.slice(0, 8)} applied by ${logins.agent}`,
+      `${made.id.slice(0, 8)} taken back by ${logins.alice}`,
+    ]);
+  });
+
+  test("gives Slack a note as text, never as a link or a call to a channel", async () => {
+    received.length = 0;
+    const port = (server.address() as AddressInfo).port;
+    const watch = watching(logins.alice, ["--slack", `http://127.0.0.1:${port}/slack`]);
+    await until(() => watch.err.some((text) => text.startsWith("Watching.")));
+    await new Keyturn(agent).propose([update(61)], {
+      note: "<!channel> approve now & see <https://example.org/x|the ticket>",
+    });
+    await until(() => received.length >= 1);
+    watch.stop();
+    await watch.done;
+    expect((received[0]?.body as { text: string } | undefined)?.text).toContain(
+      "&lt;!channel&gt; approve now &amp; see &lt;https://example.org/x|the ticket&gt;",
+    );
+  });
+
   test("says each thing as it happens, and sends it on, with sizes and never a row's values", async () => {
     received.length = 0;
     const port = (server.address() as AddressInfo).port;

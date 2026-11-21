@@ -7,7 +7,7 @@ import { Keyturn, type Queryable, Refused } from "./keyturn.ts";
 import { json, plain, renderFindings, renderList, renderProposal, type Style } from "./render.ts";
 import { serveReview } from "./review.ts";
 import { serveTools, unfitForAgent } from "./tools.ts";
-import { line, post, watch } from "./watch.ts";
+import { forSlack, line, post, watch } from "./watch.ts";
 
 const usage = `keyturn: PostgreSQL refuses an agent's write until a person approved that exact change.
 
@@ -20,7 +20,8 @@ For the tables' owner
   keyturn archive --before <date> --out <file>
                                   Write every finished proposal from before a date to a file, check the file,
                                   and take them out of the database. --keep writes and checks, and removes nothing
-  keyturn verify-archive <file>   Check that an archive file holds together. Needs no database
+  keyturn verify-archive <file>   Check that an archive file holds together. Needs no database. --hash <hash>
+                                  also checks it is the file that was written: the hash is in keyturn.archived
   keyturn uninstall --yes         Remove keyturn, its proposals and its audit log
 
 For an approver
@@ -141,6 +142,14 @@ export async function run(argv: string[], io: Io): Promise<number> {
   if (command === "verify-archive") {
     try {
       const head = await verifyArchive(target as string);
+      // The file agrees with itself. Whether it is the file that was written is a matter of
+      // its hash, which the removal left in the database and the command printed.
+      if (values.hash !== undefined && values.hash !== head.file) {
+        throw new Refused(
+          "the archive holds together, but it is not the file with that hash: it was written again since",
+          null,
+        );
+      }
       io.out(
         values.json
           ? json(head)
@@ -399,11 +408,21 @@ export async function run(argv: string[], io: Io): Promise<number> {
               await post(values.webhook, told).catch(failed("the webhook"));
             }
             if (values.slack !== undefined) {
-              await post(values.slack, { text: `keyturn: ${line(told)}` }).catch(failed("Slack"));
+              await post(values.slack, { text: `keyturn: ${forSlack(line(told))}` }).catch(
+                failed("Slack"),
+              );
             }
           },
           failed("a proposal could not be read"),
         );
+        const announced = (await db.query("select announce from keyturn.settings")).rows[0] as
+          | { announce: boolean }
+          | undefined;
+        if (announced?.announce === false) {
+          io.err(
+            "The owner has turned announcements off in this database (keyturn.settings), so nothing will be heard.",
+          );
+        }
         const waiting = await keyturn.waiting();
         io.err(
           `Watching. ${waiting.length === 0 ? "Nothing is" : waiting.length === 1 ? "One proposal is" : `${waiting.length} proposals are`} waiting now. Ctrl-C stops.`,

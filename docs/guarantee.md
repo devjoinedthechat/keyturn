@@ -96,7 +96,7 @@ This is about the proposal's own rows. Rows that others have since attached to o
 - **An approver who approves without reading.** Keyturn puts the rows in front of a person. It cannot make them look.
 - **The rows shown beside a proposal.** The rows a proposal points to, and why it waits, are read when asked for. They are not in the hash an approval names, and may have changed by the time the change is written. A rule is read then; they are not.
 - **Effects outside the database.** Emails, payments, calls to other services.
-- **That something happened.** Each step of a proposal is said on the channel `keyturn` with the proposal's id. Any login of the database may listen. What the proposal holds is not said.
+- **That something happened.** Each step of a proposal is said on the channel `keyturn` with the proposal's id. Any login of the database may listen, and any may say something there. What the proposal holds is not said, and what is said is not proof: the audit log is.
 - **Row-level security as a limit on what may be proposed.** Policies decide which rows an agent can see and name. They do not check the row an agent proposes to insert, or what it proposes a row should become: the approver does. A rule on such a table needs a condition that does the same.
 - **What a table's cascades do to other tables.** The approved rows are checked after the write. Rows a cascade changes elsewhere are that table's own design. Taking the change back puts the proposal's own rows back and not those.
 

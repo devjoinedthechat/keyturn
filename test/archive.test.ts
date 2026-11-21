@@ -137,7 +137,23 @@ describe("putting old records away", () => {
     expect(await check("more.jsonl", `${good}${lines[1]}\n`)).toContain(
       "something after its last line",
     );
+    // Its first line, which says what it holds, is under the file's hash as well.
+    const first = JSON.parse(lines[0] as string) as { before: string };
+    first.before = "2001-01-01T00:00:00.000Z";
+    expect(
+      await check("head.jsonl", [JSON.stringify(first), ...lines.slice(1)].join("\n")),
+    ).toContain("altered since it was written");
+    expect(await check("number.jsonl", good.replace(/"seq": ?"[0-9]+"/, '"seq": "1n"'))).toContain(
+      "has no number",
+    );
+    expect(await check("null.jsonl", `${lines[0]}\nnull\n`)).toContain("is not a proposal");
     expect(await check("empty.jsonl", "")).toContain("it is empty");
+    // A record with its first entry gone, the rest still a chain of its own.
+    const cut = JSON.parse(lines[1] as string) as { audit: unknown[] };
+    cut.audit = [];
+    expect(
+      await check("beginning.jsonl", [lines[0], JSON.stringify(cut), ...lines.slice(2)].join("\n")),
+    ).toContain("does not begin where it was made");
     expect((await refusal(verifyArchive(join(folder, "not-there.jsonl"))))?.message).toContain(
       "cannot be read",
     );
@@ -159,6 +175,15 @@ describe("putting old records away", () => {
     expect((await refusal(prune(owner, moment, { digest: "0".repeat(64) })))?.message).toContain(
       "that is not the digest of what would be removed",
     );
+    expect(await head()).toEqual(before);
+
+    // Somebody has one of the proposals open. The removal does not wait for them: it stops.
+    const other = await database.as(logins.owner);
+    await other.query("begin");
+    await other.query("select from keyturn.proposals where id = $1 for update", [made.rejected]);
+    const held = await refusal(prune(owner, moment, written));
+    expect(held?.message).toContain("in use by another connection. Nothing is removed");
+    await other.query("rollback");
     expect(await head()).toEqual(before);
 
     const done = await prune(owner, moment, written);
@@ -202,10 +227,21 @@ describe("putting old records away", () => {
   });
 
   test("the log is still closed to everything else", async () => {
+    expect(
+      (await refusal(owner.query("update keyturn.audit set actor = 'nobody'")))?.message,
+    ).toContain("never changed or emptied");
+    // No word said in a session opens it. Only a removal that has left its mark gets through.
     await owner.query("set keyturn.pruning = 'on'");
-    const refused = await refusal(owner.query("update keyturn.audit set actor = 'nobody'"));
+    expect((await refusal(owner.query("delete from keyturn.audit")))?.message).toContain(
+      "never changed or emptied",
+    );
     await owner.query("reset keyturn.pruning");
-    expect(refused?.message).toContain("never changed or emptied");
+    // A removal opens the log for as long as it takes, and not for the rest of its transaction.
+    await owner.query("begin");
+    await owner.query("select keyturn.prune('2000-01-01', encode(sha256(''::bytea), 'hex'))");
+    const after = await refusal(owner.query("delete from keyturn.audit"));
+    await owner.query("rollback");
+    expect(after?.message).toContain("never changed or emptied");
     expect((await refusal(owner.query("delete from keyturn.audit")))?.message).toContain(
       "never changed or emptied",
     );
@@ -253,6 +289,11 @@ describe("putting old records away", () => {
     expect(await run(["verify-archive", path], io)).toBe(0);
     expect(said.join("\n")).toContain("The archive holds together: 3 proposals, 7 entries");
     expect(await run(["verify-archive", join(folder, "rows.jsonl")], io)).toBe(1);
+    // Held against the hash the removal left in the database, it is that file and no other.
+    const mark = (await owner.query("select file from keyturn.archived order by seq desc limit 1"))
+      .rows[0].file as string;
+    expect(await run(["verify-archive", path, "--hash", mark], io)).toBe(0);
+    expect(await run(["verify-archive", path, "--hash", "0".repeat(64)], io)).toBe(1);
 
     expect(
       (
@@ -268,5 +309,37 @@ describe("putting old records away", () => {
     expect(
       (await keyturn(logins.owner, ["archive", "--before", "tomorrow-ish", "--out", "x"])).err,
     ).toContain("takes a date");
+  });
+});
+
+describe("putting away and the rest of Keyturn", () => {
+  test("what a rule let through in the last hour stays, so the rule's hourly limit still counts it", async () => {
+    await owner.query(
+      "select keyturn.allow('hold', 'orders', array['update'], array['status'], per_hour => 1)",
+    );
+    const first = await propose(agent, [update(40)]);
+    expect((await apply(agent, first.proposal_id)).status).toBe("applied");
+    const later = new Date(Date.now() + 1000);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    expect(
+      (await owner.query("select count(*)::int as n from keyturn.archivable($1)", [later])).rows[0]
+        .n,
+    ).toBe(0);
+    // And so the second in the hour still waits for a person.
+    const second = await propose(agent, [update(41)]);
+    expect((await refusal(apply(agent, second.proposal_id)))?.message).toContain(
+      "this one waits for a person",
+    );
+  });
+
+  test("an archive is not written over a pool, and what a change wrote is in the file", async () => {
+    const pool = { query: owner.query.bind(owner), totalCount: 1 } as unknown as pg.Client;
+    expect(
+      (await refusal(writeArchive(pool, new Date(), join(folder, "pool.jsonl"))))?.message,
+    ).toContain("one connection, not a pool");
+    const kept = (await readFile(join(folder, "kept.jsonl"), "utf8")).trim().split("\n");
+    expect(Array.isArray((JSON.parse(kept[1] as string) as { written: unknown }).written)).toBe(
+      true,
+    );
   });
 });

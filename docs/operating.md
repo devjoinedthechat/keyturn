@@ -144,6 +144,10 @@ keyturn verify-archive keyturn-2025.jsonl
 - Nothing is removed that the file does not hold: the removal is given the digest of what was written, and refuses if what it would remove has any other.
 - A mark stays in `keyturn.archived`: when, by whom, how many, the digest, the hash of the file, and the value of the whole log before and after. `keyturn verify-audit` holds for what is left.
 - `keyturn verify-archive` needs no database. It reports a line altered, added, removed or moved; an entry changed; rows that are not the rows an approval named; a file cut short.
+- What a rule let through in the last hour stays in the database until the hour is out, whatever date is given. A rule counts its hourly limit from the log.
+- If another connection has a proposal open, nothing is removed and the command says so. Run it again.
+- An entry leaves the log only while a removal that has left its mark is at work. No setting opens the log, for the owner or anyone else.
+- `keyturn verify-archive <file> --hash <hash>` also checks that the file is the one that was written. The hash is printed when the file is written and kept in `keyturn.archived`. Without it, the check shows the file agrees with itself, which a file rewritten with care also does.
 - The file's own hash is what tells an altered file from the one that was written, so keep it apart from the file. The command prints it, and the mark has it.
 - A file is never written over. It is made readable by its owner only.
 
@@ -165,7 +169,10 @@ keyturn watch --webhook https://example.org/keyturn --json
 - Nothing a row holds is sent. The note is sent, and the note is the agent's own words.
 - An address that refuses or does not answer in ten seconds is reported and does not stop the watching.
 - What happened while it was not running is not told afterwards. `keyturn list` shows what is waiting.
-- Underneath, Keyturn says each step on the PostgreSQL channel `keyturn`, as `{"event": "opened", "proposal": "<id>"}`, when the step's transaction is kept. Your own program can `LISTEN keyturn` in place of this command. Any login of the database may listen, and learns that much and no more.
+- Underneath, Keyturn says each step on the PostgreSQL channel `keyturn`, as `{"event": "opened", "proposal": "<id>"}`, when the step's transaction is kept. Any login of the database may listen, and learns that much and no more.
+- Any login may also say something there, an agent included. So what is heard is a reason to look and nothing more. `keyturn watch` reads each step from the audit log before it tells it, with who did it as the log has it. A message with no new entry behind it tells nothing, and a flood of them costs one look.
+- Your own program can `LISTEN keyturn` in place of this command. Have it read `keyturn.audit` for the proposal that was named, and believe that.
+- To have nothing said, as the owner: `update keyturn.settings set announce = false`. Do this if the database prepares transactions for two-phase commit, which PostgreSQL refuses for a transaction that has said something. `keyturn watch` then hears nothing.
 
 ## What the approver is shown beside the rows
 
@@ -198,10 +205,15 @@ keyturn revert 0f65fb6a --reason "Refunded the wrong order."
 keyturn upgrade
 ```
 
-- Connect as the owner. It moves the Keyturn in the database to the version of the program, and keeps every proposal, every rule and the whole audit log.
+- Connect as the login that owns Keyturn, the one that installed it. Another login is refused, a superuser too. It moves the Keyturn in the database to the version of the program, and keeps every proposal, every rule and the whole audit log.
 - It is one transaction, all or nothing. For the moment it runs, nothing can be proposed, decided or applied.
 - The audit log has to come out exactly as it went in: the same entries and the same value for the whole log. If it does not, nothing is changed.
 - A table that has been dropped since it was put under Keyturn is left out. Its proposals stay on record.
+- A table whose columns changed since it was protected is still marked as changed afterwards. Protect it again, as before.
+- It is refused if something of your own hangs on Keyturn's tables or functions: a view of the audit log, a foreign key to a proposal, a row-level policy that calls `keyturn.caller_is`. They would be dropped with what they hang on. Each is named. Drop them, upgrade, and make them again.
+- It is refused if a right on Keyturn's own tables or functions was given by hand to another role, which would be lost. Revoke it, upgrade, and grant it again.
+- The rights of the three Keyturn roles come out as a fresh install gives them. If you took one away or added one by hand, do it again afterwards.
+- Anything you added inside the `keyturn` schema itself, such as a trigger, a policy, a column or a comment on its tables, is replaced with the rest. Keep your own things outside it.
 - Run `keyturn doctor` afterwards.
 - A database with a later version than the program is refused: use the later program.
 
