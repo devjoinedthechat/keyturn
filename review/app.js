@@ -397,8 +397,9 @@ async function loadList() {
   state.list = data.proposals;
   state.more = data.more;
   if (view === "waiting") {
+    // No figure at all when nothing waits: a badge that says nought still catches the eye.
     document.getElementById("count-waiting").textContent =
-      `${state.list.length}${state.more ? "+" : ""}`;
+      state.list.length === 0 ? "" : `${state.list.length}${state.more ? "+" : ""}`;
   }
   drawQueue();
 }

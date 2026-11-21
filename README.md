@@ -33,10 +33,9 @@ An agent connected through Keyturn cannot change a protected table. It can only 
 
 Nothing depends on the agent, a framework hook or a proxy behaving.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
-  <img alt="The review page showing a proposal of 8,114 deletes waiting for approval" src="docs/images/review-light.png">
-</picture>
+![An agent's delete that is far too wide becomes a proposal; the approver reads it and rejects it; the agent proposes the twelve rows that were meant; they are approved, applied, and taken back](docs/walkthrough/keyturn-walkthrough.svg)
+
+The review page, with PostgreSQL in a container and the agent's SQL sent as an ordinary login. Every picture is the real page. [How it was made](docs/walkthrough/README.md).
 
 ## What it looks like
 
@@ -198,6 +197,11 @@ keyturn review               # the same on a page, on this machine only
 keyturn revert 0f65fb6a      # take an applied change back
 ```
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
+  <img alt="The review page showing a proposal of 8,114 deletes waiting for approval" src="docs/images/review-light.png">
+</picture>
+
 The review page puts the size of the change first and sends the hash of what was on screen with the approval. It adds no power: it calls the same database functions as the approver's login.
 
 What an agent wrote is shown exactly. Hidden and direction-reversing characters appear as their codes, trailing spaces and line breaks are marked, and numbers keep every digit. Rows that were never put on screen are approved only by typing their number.
@@ -295,7 +299,7 @@ The time that matters is the person's. Keyturn is for changes worth a person's l
 
 - **A proposal holds at most 10,000 rows.** A wider statement is refused whole. Make the change in parts.
 - **A login may have 200 proposals waiting.** More are refused until some are decided or expire, so the party under review cannot bury the queue.
-- **Version 0.1 installs into a database that does not have Keyturn.** Moving to a later version means `keyturn uninstall` and `keyturn install`, which removes proposals and the audit log.
+- **`keyturn upgrade` moves an installed Keyturn to a later version.** Every proposal, rule and audit entry is kept, and the audit log must come out exactly as it went in or nothing is changed.
 - **The agent does not see its proposed change when it reads again.** Nothing is written until apply.
 - **A proposal is applied in a read committed transaction.** That is PostgreSQL's default. In a transaction that keeps one view of the data, apply is refused.
 - **A view holds on to its table's columns.** Before dropping or retyping a column, run `select keyturn.drop_view('orders')`, then `select keyturn.protect('orders')` after.

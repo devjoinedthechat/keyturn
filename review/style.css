@@ -500,23 +500,12 @@ kbd {
 .steps {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 0;
+  gap: 4px 24px;
   margin: 0 0 26px;
   padding: 0;
   list-style: none;
   color: var(--soft);
   font-size: 13px;
-}
-
-/* One step leads to the next. The line is at the end of a step, so a new line of steps never starts with one. */
-.steps li:not(:last-child)::after {
-  display: inline-block;
-  width: 18px;
-  height: 1px;
-  margin: 0 9px;
-  background: var(--rule);
-  vertical-align: middle;
-  content: "";
 }
 
 .steps b {
