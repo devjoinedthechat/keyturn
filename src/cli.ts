@@ -1,7 +1,7 @@
 import type { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import pg from "pg";
-import { install, installed, protect, uninstall, unprotect, version } from "./install.ts";
+import { install, installed, protect, uninstall, unprotect, upgrade, version } from "./install.ts";
 import { Keyturn, type Queryable, Refused } from "./keyturn.ts";
 import { json, plain, renderFindings, renderList, renderProposal, type Style } from "./render.ts";
 import { serveReview } from "./review.ts";
@@ -11,6 +11,7 @@ const usage = `keyturn: PostgreSQL refuses an agent's write until a person appro
 
 For the tables' owner
   keyturn install                 Install into the database
+  keyturn upgrade                 Move an installed keyturn to this version, keeping its proposals, rules and audit log
   keyturn protect <table>         Put a table under keyturn. --loose lets the table's own triggers alter applied rows
   keyturn unprotect <table>       Take a table out again
   keyturn doctor                  Check that an agent has no way round. Exit 1 if it has
@@ -72,6 +73,7 @@ export interface Link extends Queryable {
 /** What each command is given after its name. */
 const commands: Record<string, string | null> = {
   install: null,
+  upgrade: null,
   uninstall: null,
   protect: "a table",
   unprotect: "a table",
@@ -182,6 +184,14 @@ export async function run(argv: string[], io: Io): Promise<number> {
       case "install": {
         const done = await install(db);
         print(done, `Installed keyturn ${done.version}. Next: keyturn protect <table>`);
+        return 0;
+      }
+      case "upgrade": {
+        const moved = await upgrade(db);
+        print(
+          moved,
+          `Moved keyturn from ${moved.from} to ${moved.to}. Every proposal, rule and audit entry was kept.\nNext: keyturn doctor`,
+        );
         return 0;
       }
       case "uninstall": {

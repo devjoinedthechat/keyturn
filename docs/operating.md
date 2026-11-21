@@ -165,7 +165,18 @@ keyturn revert 0f65fb6a --reason "Refunded the wrong order."
 
 ## Moving to a later version
 
-Version 0.1 installs into a database that does not have Keyturn, and refuses one that does. To move to a later version, uninstall and install. Proposals and the audit log are removed with it, so record the audit head and export `keyturn.audit` first if the record matters.
+```bash
+keyturn upgrade
+```
+
+- Connect as the owner. It moves the Keyturn in the database to the version of the program, and keeps every proposal, every rule and the whole audit log.
+- It is one transaction, all or nothing. For the moment it runs, nothing can be proposed, decided or applied.
+- The audit log has to come out exactly as it went in: the same entries and the same value for the whole log. If it does not, nothing is changed.
+- A table that has been dropped since it was put under Keyturn is left out. Its proposals stay on record.
+- Run `keyturn doctor` afterwards.
+- A database with a later version than the program is refused: use the later program.
+
+The test suite installs version 0.1.0 from that version's own SQL, uses it, and moves it to the current version.
 
 ## Removing
 

@@ -1,4 +1,13 @@
-export { install, installed, protect, rolesSql, uninstall, unprotect, version } from "./install.ts";
+export {
+  install,
+  installed,
+  protect,
+  rolesSql,
+  uninstall,
+  unprotect,
+  upgrade,
+  version,
+} from "./install.ts";
 export {
   type Change,
   type ColumnDiff,
