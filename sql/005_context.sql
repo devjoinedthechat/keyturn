@@ -101,6 +101,8 @@ create function keyturn.waits_because(p_proposal_id uuid)
   set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
+  set lc_numeric = 'C' set lc_time = 'C' set timezone_abbreviations = 'Default'
+  set default_text_search_config = 'pg_catalog.simple'
   as $$
 #variable_conflict use_column
 declare

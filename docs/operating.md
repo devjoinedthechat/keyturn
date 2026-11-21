@@ -100,7 +100,7 @@ select keyturn.allow(
 - `test/policy-port.test.ts` in the repository holds a refund policy of nine conditions, written as one rule that lets through and one that forbids, against the same policy as code, on 1,302 refunds an agent could ask for.
 - The hourly count is kept by the rule's name and read from the audit log.
 - A proposal is applied only in a read committed transaction, the default. In any other, `keyturn.apply` is refused.
-- A condition is worked out under fixed settings, whatever the session's are, with times in UTC. If it depends on another setting, such as a text search configuration, name that in the condition.
+- A condition is worked out under fixed settings, whatever the session's are: times in UTC, numbers and dates written one way, and the plain `simple` text search configuration. Name what you mean in the condition itself, as in `to_tsvector('english', ...)`, and do not let it depend on any other setting of the session.
 - On a table with row-level security, give the rule a condition that keeps rows to what the agent may see. `keyturn doctor` points such tables out.
 - Switch one off with `update keyturn.rules set active = false where name = 'close_tickets'`.
 

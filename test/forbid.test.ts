@@ -398,4 +398,60 @@ describe("what an independent review found", () => {
       "forbidden by the rule frozen",
     );
   });
+
+  test("the text search an agent's session prefers does not change a condition either", async () => {
+    await forbid(
+      `'no_refund_stem', 'charges', array['insert'], 'to_tsvector(''english'', after ->> ''note'') @@ ''refund''::tsquery', 'Refunds are not made as charges.'`,
+    );
+    const sly = await database.as(logins.agent);
+    await sly.query("set default_text_search_config = 'pg_catalog.simple'");
+    const refused = await refusal(
+      propose(sly, [
+        {
+          table: "charges",
+          operation: "insert",
+          values: { id: fresh() + 50_000, account: fresh(), amount: 5, note: "refunds" },
+        },
+      ]),
+    );
+    expect(refused?.message).toContain("forbidden by the rule no_refund_stem");
+    // A condition that leaves the choice to the session gets one fixed answer, not the caller's.
+    await owner.query("update keyturn.forbidden set active = false where name = 'no_refund_stem'");
+    await forbid(
+      `'no_refund_word_plain', 'charges', array['insert'], 'to_tsvector(after ->> ''note'') @@ ''refunding''::tsquery', 'Refunds are not made as charges.'`,
+    );
+    for (const setting of ["pg_catalog.simple", "pg_catalog.english"]) {
+      await sly.query(`set default_text_search_config = '${setting}'`);
+      const made = await refusal(
+        propose(sly, [
+          {
+            table: "charges",
+            operation: "insert",
+            values: { id: fresh() + 50_000, account: fresh(), amount: 5, note: "refunding" },
+          },
+        ]),
+      );
+      expect(made?.message, setting).toContain("forbidden by the rule no_refund_word_plain");
+    }
+  });
+
+  test("an agent cannot hold up the applying of other proposals for a table", async () => {
+    const account = fresh();
+    const proposed = await propose(agent, [charge(account, 10)]);
+    await approve(proposed);
+    const sly = await database.as(logins.agent);
+    // The lock an earlier version waited on, which anyone could take.
+    await sly.query(
+      "select pg_advisory_lock(hashtext('keyturn.forbidden'), hashtext('charges'::regclass::oid::text))",
+    );
+    // And the one it waits on now, which an agent may not.
+    expect((await refusal(sly.query("select from keyturn.protected for update")))?.code).toBe(
+      "42501",
+    );
+    await agent.query("set lock_timeout = '2s'");
+    const outcome = await apply(agent, proposed.proposal_id);
+    await agent.query("reset lock_timeout");
+    await sly.query("select pg_advisory_unlock_all()");
+    expect(outcome.status).toBe("applied");
+  });
 });

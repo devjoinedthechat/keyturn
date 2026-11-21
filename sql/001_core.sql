@@ -199,6 +199,8 @@ create function keyturn.rules_covering(p_proposal_id uuid) returns jsonb
   set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
+  set lc_numeric = 'C' set lc_time = 'C' set timezone_abbreviations = 'Default'
+  set default_text_search_config = 'pg_catalog.simple'
   as $$
 declare
   change  keyturn.changes;
@@ -245,6 +247,8 @@ create function keyturn.allow(name text, relation regclass, operations text[], c
   set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
+  set lc_numeric = 'C' set lc_time = 'C' set timezone_abbreviations = 'Default'
+  set default_text_search_config = 'pg_catalog.simple'
   as $$
 -- The parameters carry the names of the rule's columns, so that a call reads
 -- "max_rows => 5". Inside, a bare name is the column and "allow.name" the parameter.
@@ -305,6 +309,8 @@ create function keyturn.forbidden_by(p_relation regclass, p_operation text, p_be
   set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
+  set lc_numeric = 'C' set lc_time = 'C' set timezone_abbreviations = 'Default'
+  set default_text_search_config = 'pg_catalog.simple'
   as $$
 declare
   rule  keyturn.forbidden;
@@ -330,6 +336,8 @@ create function keyturn.forbid(name text, relation regclass, operations text[], 
   set standard_conforming_strings = on set transform_null_equals = off set array_nulls = on
   set timezone = 'UTC' set datestyle = 'ISO, YMD' set intervalstyle = 'iso_8601'
   set extra_float_digits = 3 set bytea_output = 'hex' set lc_monetary = 'C'
+  set lc_numeric = 'C' set lc_time = 'C' set timezone_abbreviations = 'Default'
+  set default_text_search_config = 'pg_catalog.simple'
   as $$
 #variable_conflict use_column
 begin
@@ -699,8 +707,10 @@ create function keyturn.caller_is(p_group name) returns boolean
 -- transaction's turn at each such table. Proposals for one table are thus written one after
 -- the other, and each sees what the one before it wrote.
 --
--- The turn is an advisory lock, held to the end of the transaction. It is not a lock on the
--- rules themselves: the owner can always write or switch off a rule, whatever is waiting.
+-- The turn is a lock on the table's entry in the list of protected tables, held to the end
+-- of the transaction. An agent cannot take it: it may read that list and not write it. And it
+-- is not a lock on the rules themselves: the owner can always write or switch off a rule,
+-- whatever is waiting.
 create function keyturn.hold_forbidden(p_proposal_id uuid) returns boolean
   language plpgsql
   set search_path = pg_catalog, pg_temp
@@ -714,7 +724,7 @@ begin
      where f.active and f.relation in (select c.relation from keyturn.changes c where c.proposal_id = p_proposal_id)
      order by 1
   loop
-    perform pg_advisory_xact_lock(hashtext('keyturn.forbidden'), hashtext(held::text));
+    perform from keyturn.protected p where p.relation = held for update;
     any_ := true;
   end loop;
   return any_;
