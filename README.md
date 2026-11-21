@@ -307,7 +307,7 @@ The time that matters is the person's. Keyturn is for changes worth a person's l
 - **The table's triggers, defaults and cascades run at apply.** A row that comes out different from what was approved fails the apply, unless the table was protected with `--loose`.
 - **Installing needs three roles.** If the installing login may not create roles, `keyturn install` prints the three statements for an administrator.
 
-[docs/operating.md](docs/operating.md) covers installing, moving to a later version, rules, the audit log and removal. [docs/support.md](docs/support.md) says what happens with each kind of table, column and statement, each line held by a test.
+[examples/refund-desk](examples/refund-desk/README.md) is a support agent on Keyturn with a real model in the loop: eighteen tickets, twelve of them attempts at abuse, judged by what ended up in the database. [docs/operating.md](docs/operating.md) covers installing, moving to a later version, rules, the audit log and removal. [docs/support.md](docs/support.md) says what happens with each kind of table, column and statement, each line held by a test.
 
 ## How it differs
 
