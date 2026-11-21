@@ -26,6 +26,8 @@ const state = {
   mode: "idle",
   refused: null,
   busy: false,
+  // True for the one drawing of the bar that follows an approval.
+  turning: false,
   loading: false,
   unchanged: new Set(),
   // When the confirming button may first be pressed.
@@ -122,6 +124,34 @@ function el(tag, attributes = {}, ...children) {
 }
 
 const chip = (text, title) => el("span", { class: "code", title }, text);
+
+/** A drawing, made of the shapes given. Nothing in it is text, and a screen reader passes it by. */
+function drawing(box, cls, shapes) {
+  const space = "http://www.w3.org/2000/svg";
+  const node = document.createElementNS(space, "svg");
+  node.setAttribute("viewBox", box);
+  node.setAttribute("class", cls);
+  node.setAttribute("aria-hidden", "true");
+  for (const [tag, attributes] of shapes) {
+    const shape = document.createElementNS(space, tag);
+    for (const [name, value] of Object.entries(attributes)) {
+      shape.setAttribute(name, value);
+    }
+    node.append(shape);
+  }
+  return node;
+}
+
+/**
+ * A lock, seen from the front: a ring and the slot a key goes in. Turned, the slot lies on
+ * its side and the quarter turn it made is drawn on the ring, as in the keyturn mark.
+ */
+const lock = (turned) =>
+  drawing("0 0 32 32", turned ? "lock turned" : "lock", [
+    ["circle", { class: "ring", cx: "16", cy: "16", r: "12.5" }],
+    ["path", { class: "arc", d: "M16 3.5 A12.5 12.5 0 0 1 28.5 16" }],
+    ["rect", { class: "slot", x: "14.5", y: "8.5", width: "3", height: "15", rx: "1.5" }],
+  ]);
 
 /** Text an agent wrote, with nothing in it left unseen. */
 function written(text) {
@@ -293,6 +323,7 @@ function drawQueue() {
           ? el("span", { class: `state ${standing(proposal)}` }, stateWords[standing(proposal)])
           : null,
       ),
+      mix(proposal),
       parts,
       el(
         "span",
@@ -326,6 +357,23 @@ function drawQueue() {
   if (state.me !== null && waiting !== null) {
     document.title = `${waiting > 0 ? `(${waiting}) ` : ""}keyturn review: ${state.me.database}`;
   }
+}
+
+/**
+ * What a proposal is made of, at a glance. The bar's length is its size, a tenfold change a
+ * step longer, so that a proposal of thousands of rows does not sit in the list looking like
+ * a proposal of one. Its colours are the share of rows added, changed and removed.
+ */
+function mix(proposal) {
+  const bar = el("span", { class: "mix", "aria-hidden": "true" });
+  // Set on the elements themselves: the page's own rules allow no style written into the markup.
+  bar.style.width = `${Math.min(100, 14 + 21.5 * Math.log10(Math.max(1, proposal.changes)))}%`;
+  for (const part of proposal.extent) {
+    const share = el("span", { class: part.operation });
+    share.style.flexGrow = String(part.rows);
+    bar.append(share);
+  }
+  return bar;
 }
 
 /** The proposal after the open one in the list, or before it; the first when the open one is not listed. */
@@ -374,6 +422,15 @@ function drawSheet() {
 
   const parts = [];
   parts.push(
+    el(
+      "p",
+      { class: "eyebrow" },
+      el("span", { class: `pill ${standing(proposal)}` }, stateWords[standing(proposal)]),
+      // The start of its id is how it is named at the command line.
+      el("span", { class: "id", title: proposal.id }, proposal.id.slice(0, 8)),
+    ),
+  );
+  parts.push(
     proposal.note === ""
       ? el("p", { class: "note absent" }, "No note was given with this proposal.")
       : el("p", { class: "note" }, written(proposal.note)),
@@ -420,7 +477,7 @@ function drawSheet() {
       ...state.extent.map((part) =>
         el(
           "li",
-          { class: part.operation === "delete" ? "gone" : "" },
+          { class: part.operation === "delete" ? "delete gone" : part.operation },
           el("span", { class: "figure" }, many(part.rows, part.operation)),
           el("span", { class: "what" }, "in ", written(part.table)),
         ),
@@ -819,6 +876,7 @@ function drawKeys() {
   const first = el(
     "section",
     { class: "key", "aria-label": "First key" },
+    lock(true),
     el("p", { class: "label turned" }, "First key, turned"),
     el("p", {}, written(proposal.proposedBy), ` proposed ${many(proposal.changes, "change")}.`),
     el(
@@ -1138,6 +1196,12 @@ function drawKeys() {
       acts.append(next);
     }
   }
+  const turned = lock(second.querySelector(".label.turned") !== null);
+  if (state.turning) {
+    turned.classList.add("turning");
+    state.turning = false;
+  }
+  second.prepend(turned);
   keys.replaceChildren(first, second);
 }
 
@@ -1174,6 +1238,8 @@ async function act(path, body, done) {
       state.proposal = data.proposal;
       state.history = data.history;
       state.mode = "idle";
+      // The second key has just been turned, and is seen to turn.
+      state.turning = path === "approve" && data.proposal.status === "approved";
       said.textContent = done(data.proposal);
     } else {
       state.refused = refusal;

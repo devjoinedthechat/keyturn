@@ -1,36 +1,60 @@
+/*
+ * The review page.
+ *
+ * Two surfaces. The dark one is Keyturn itself: the bar along the top and the bar with the
+ * two keys along the bottom. The light one between them is the proposal, set like a
+ * document, because it is the thing to be read. Orange is the turn of a key and nothing
+ * else: it marks what has been turned and what turning would do.
+ */
+
 :root {
-  --paper: #f6f4ee;
-  --sheet: #fffefb;
-  --ink: #1d1c19;
-  --soft: #6a665c;
-  --rule: #dcd7ca;
-  --faint: #ece8dd;
-  --brass: #8a5a00;
-  --brass-ink: #fffdf6;
-  --brass-wash: #f5e9cc;
-  --gone: #a3261c;
-  --gone-wash: #fbe9e6;
-  --came: #17663a;
-  --came-wash: #e4f3e8;
+  --chrome: #14171b;
+  --chrome-raised: #1d2126;
+  --chrome-edge: #3a4149;
+  --chrome-ink: #f2f3f1;
+  --chrome-soft: #a3aab3;
+  --turn-bright: #fb8a3c;
+  --turn-bright-ink: #1c0f05;
+  --alarm-bright: #ff9488;
+  --live: #4ade80;
+
+  --paper: #efeeea;
+  --sheet: #ffffff;
+  --ink: #191c20;
+  --soft: #5a616a;
+  --rule: #dcdad3;
+  --faint: #f5f4f0;
+  --turn: #b83b0a;
+  --turn-wash: #fff0e4;
+  --gone: #b42318;
+  --gone-wash: #fdecea;
+  --came: #146c3c;
+  --came-wash: #e4f5ea;
+  --lift: 0 1px 2px rgb(20 23 27 / 8%), 0 6px 18px rgb(20 23 27 / 7%);
+
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #151412;
-    --sheet: #1c1b18;
-    --ink: #ece9e1;
-    --soft: #a29d90;
-    --rule: #37352f;
-    --faint: #26251f;
-    --brass: #e2b354;
-    --brass-ink: #1b1608;
-    --brass-wash: #3a2f14;
-    --gone: #ff8f82;
-    --gone-wash: #3a1b18;
-    --came: #7fd49c;
-    --came-wash: #17301f;
+    --chrome: #0b0d0f;
+    --chrome-raised: #15181c;
+    --chrome-edge: #30363d;
+
+    --paper: #111417;
+    --sheet: #181c20;
+    --ink: #e9ebed;
+    --soft: #9aa3ad;
+    --rule: #2a3037;
+    --faint: #1f2429;
+    --turn: #fb8a3c;
+    --turn-wash: #33210f;
+    --gone: #ff9488;
+    --gone-wash: #3a1c1a;
+    --came: #84dba6;
+    --came-wash: #143021;
+    --lift: 0 0 0 1px #2a3037;
   }
 }
 
@@ -50,6 +74,7 @@ body {
   background: var(--paper);
   color: var(--ink);
   font: 15px / 1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
 }
 
 button {
@@ -62,78 +87,120 @@ button {
 }
 
 :focus-visible {
-  outline: 2px solid var(--brass);
+  outline: 2px solid var(--turn);
   outline-offset: 2px;
 }
 
+::selection {
+  background: var(--turn-wash);
+  color: var(--ink);
+}
+
+/* ---------------------------------------------------------------- the bar along the top */
+
 .top {
   display: flex;
-  align-items: baseline;
-  gap: 20px;
-  padding: 12px 24px;
-  border-bottom: 1px solid var(--rule);
+  align-items: center;
+  gap: 18px;
+  padding: 10px 20px;
+  background: var(--chrome);
+  color: var(--chrome-ink);
+}
+
+.top :focus-visible,
+.keys :focus-visible {
+  outline-color: var(--turn-bright);
 }
 
 .mark {
   margin: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   font: 600 15px var(--mono);
   letter-spacing: 0.02em;
 }
 
 .mark svg {
   flex: none;
-  /* The baseline of the word, not the middle of the line, is where a mark sits. */
-  translate: 0 -1px;
+  width: 20px;
+  height: 20px;
 }
 
 .mark .turn {
-  stroke: var(--brass);
+  stroke: var(--turn-bright);
 }
 
 .who {
-  color: var(--soft);
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--chrome-soft);
+  font-size: 13px;
+}
+
+/* Whether the page still has the database. Green while it does. */
+.who::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--live);
+  vertical-align: 1px;
+}
+
+body:has(.lost:not([hidden])) .who::before {
+  background: var(--alarm-bright);
 }
 
 .views {
   display: flex;
-  gap: 18px;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--chrome-raised);
 }
 
 .views button {
-  color: var(--soft);
-  padding: 2px 0;
-  border-bottom: 2px solid transparent;
+  padding: 5px 12px;
+  border-radius: 7px;
+  color: var(--chrome-soft);
+  font-size: 14px;
 }
 
 .views button:hover {
-  color: var(--ink);
+  color: var(--chrome-ink);
 }
 
 .views button[aria-pressed="true"] {
-  color: var(--ink);
-  border-bottom-color: var(--brass);
+  background: var(--chrome-edge);
+  color: var(--chrome-ink);
 }
 
 #count-waiting {
-  font: 600 13px var(--mono);
+  display: inline-block;
+  min-width: 1.7em;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--turn-bright);
+  color: var(--turn-bright-ink);
+  font: 600 11px / 1.7 var(--mono);
+  text-align: center;
+  vertical-align: 1px;
 }
 
-::selection {
-  background: var(--brass-wash);
-  color: var(--ink);
+#count-waiting:empty {
+  display: none;
 }
 
 .lost {
   margin: 0;
-  padding: 10px 24px;
+  padding: 10px 20px;
   background: var(--gone-wash);
   color: var(--gone);
   border-bottom: 1px solid var(--rule);
@@ -143,38 +210,46 @@ button {
   display: none;
 }
 
+/* ---------------------------------------------------------------- the list */
+
 .frame {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(230px, 300px) 1fr;
+  grid-template-columns: minmax(250px, 320px) 1fr;
   min-height: 0;
 }
 
 .queue {
   overflow-y: auto;
+  padding: 10px 8px;
   border-right: 1px solid var(--rule);
-  padding: 8px 0;
 }
 
 .queue .none {
-  color: var(--soft);
-  padding: 16px 24px;
   margin: 0;
+  padding: 14px 16px;
+  color: var(--soft);
 }
 
 .queue button {
   display: block;
   width: 100%;
+  padding: 12px 14px 13px;
+  border-radius: 10px;
   text-align: left;
-  padding: 12px 20px 12px 24px;
+}
+
+.queue button + button {
+  margin-top: 2px;
 }
 
 .queue button:hover {
-  background: color-mix(in srgb, var(--sheet) 55%, transparent);
+  background: color-mix(in srgb, var(--sheet) 60%, transparent);
 }
 
 .queue button[aria-current="true"] {
   background: var(--sheet);
+  box-shadow: var(--lift);
 }
 
 .queue .head {
@@ -185,14 +260,14 @@ button {
 }
 
 .queue .size {
-  font: 600 17px var(--mono);
+  font: 600 16px var(--mono);
 }
 
 /* What became of it, where the eye can run down the list and find the one that went wrong. */
 .queue .state {
   flex: none;
-  font: 600 11px var(--mono);
-  letter-spacing: 0.06em;
+  font: 600 10.5px var(--mono);
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--soft);
 }
@@ -208,27 +283,34 @@ button {
 
 .queue .state.reverted,
 .queue .state.approved {
-  color: var(--brass);
+  color: var(--turn);
 }
 
-.queue .hint {
-  margin: 0;
-  padding: 16px 24px 8px;
-  color: var(--soft);
-  font-size: 12px;
+/* What it is made of: the share of rows added, changed and removed. */
+.mix {
+  display: flex;
+  gap: 2px;
+  height: 4px;
+  margin: 8px 0 7px;
+  border-radius: 2px;
+  overflow: hidden;
 }
 
-kbd {
-  display: inline-block;
-  min-width: 1.6em;
-  padding: 0 4px;
-  font: 11px / 1.6 var(--mono);
-  text-align: center;
-  color: var(--ink);
-  background: var(--sheet);
-  border: 1px solid var(--rule);
-  border-bottom-width: 2px;
-  border-radius: 4px;
+.mix span {
+  min-width: 6px;
+  border-radius: 2px;
+}
+
+.mix .insert {
+  background: var(--came);
+}
+
+.mix .update {
+  background: var(--soft);
+}
+
+.mix .delete {
+  background: var(--gone);
 }
 
 .queue .parts,
@@ -243,56 +325,163 @@ kbd {
 }
 
 .queue .words {
-  display: block;
-  margin-top: 4px;
+  display: -webkit-box;
+  margin-top: 5px;
   font-size: 13px;
+  line-height: 1.4;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
+
+.queue .hint {
+  margin: 0;
+  padding: 16px 14px 6px;
+  color: var(--soft);
+  font-size: 12px;
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.7em;
+  padding: 0 4px;
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--sheet);
+  color: var(--ink);
+  font: 11px / 1.6 var(--mono);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- the proposal */
 
 .sheet {
   overflow-y: auto;
-  padding: 32px clamp(20px, 5vw, 64px) 48px;
+  padding: 36px clamp(24px, 5vw, 72px) 56px;
   background: var(--sheet);
   outline: none;
 }
 
 .sheet > .none {
+  max-width: 44ch;
+  margin: 18vh auto 0;
   color: var(--soft);
-  max-width: 46ch;
+  text-align: center;
+}
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.pill {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--faint);
+  color: var(--soft);
+  font: 600 10.5px / 1.5 var(--mono);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.pill.pending,
+.pill.approved,
+.pill.reverted {
+  background: var(--turn-wash);
+  color: var(--turn);
+}
+
+.pill.applied {
+  background: var(--came-wash);
+  color: var(--came);
+}
+
+.pill.rejected,
+.pill.failed {
+  background: var(--gone-wash);
+  color: var(--gone);
+}
+
+.eyebrow .id {
+  color: var(--soft);
+  font: 12px var(--mono);
 }
 
 .note {
-  font-size: 22px;
-  line-height: 1.35;
-  margin: 0 0 6px;
-  max-width: 60ch;
+  max-width: 34em;
+  margin: 0 0 8px;
+  font-size: 25px;
+  font-weight: 600;
+  line-height: 1.28;
+  letter-spacing: -0.012em;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .note.absent {
   color: var(--soft);
+  font-weight: 400;
 }
 
 .said-by {
+  margin: 0 0 26px;
   color: var(--soft);
-  margin: 0 0 28px;
+  font-size: 14px;
 }
 
+/* How much it would change, before anything else: forty thousand deletes should not look like one. */
 .extent {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 32px;
-  margin: 0 0 8px;
+  gap: 10px;
+  margin: 0 0 22px;
   padding: 0;
   list-style: none;
 }
 
+.extent li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 12px;
+  align-items: center;
+  min-width: 190px;
+  padding: 11px 18px 11px 11px;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+}
+
+.extent li::before {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+  background: var(--faint);
+  color: var(--soft);
+  font: 600 20px / 1 var(--mono);
+  content: "~";
+}
+
+.extent li.insert::before {
+  background: var(--came-wash);
+  color: var(--came);
+  content: "+";
+}
+
+.extent li.delete::before {
+  background: var(--gone-wash);
+  color: var(--gone);
+  content: "\2212";
+}
+
 .extent .figure {
-  font: 600 30px / 1.1 var(--mono);
   display: block;
+  white-space: nowrap;
+  font: 600 20px / 1.2 var(--mono);
 }
 
 .extent .gone .figure {
@@ -305,14 +494,25 @@ kbd {
 }
 
 .steps {
-  list-style: none;
-  margin: 20px 0 28px;
-  padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 20px;
+  gap: 6px 0;
+  margin: 0 0 26px;
+  padding: 0;
+  list-style: none;
   color: var(--soft);
   font-size: 13px;
+}
+
+/* One step leads to the next. The line is at the end of a step, so a new line of steps never starts with one. */
+.steps li:not(:last-child)::after {
+  display: inline-block;
+  width: 18px;
+  height: 1px;
+  margin: 0 9px;
+  background: var(--rule);
+  vertical-align: middle;
+  content: "";
 }
 
 .steps b {
@@ -321,25 +521,30 @@ kbd {
 }
 
 .banner {
-  margin: 0 0 24px;
-  padding: 10px 14px;
+  margin: 0 0 22px;
+  padding: 12px 16px;
+  border-radius: 12px;
   background: var(--gone-wash);
 }
 
 /* Taken back is a decision, not a fault. */
 .banner.taken-back {
-  background: var(--brass-wash);
+  background: var(--turn-wash);
 }
 
 .waits {
-  margin: 0 0 24px;
-  padding: 10px 14px;
-  background: var(--brass-wash);
+  margin: 0 0 26px;
+  padding: 13px 16px 14px;
+  border-radius: 12px;
+  background: var(--turn-wash);
 }
 
 .waits-head {
-  margin: 0 0 4px;
-  font-weight: 600;
+  margin: 0 0 5px;
+  color: var(--turn);
+  font: 600 10.5px var(--mono);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
 }
 
 .waits ul {
@@ -348,33 +553,27 @@ kbd {
 }
 
 .waits .seq {
+  color: var(--soft);
   font: 12px var(--mono);
+}
+
+.table-name {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 32px 0 12px;
   color: var(--soft);
-}
-
-.points-to {
-  margin: 8px 0 20px 18px;
-}
-
-.points-head {
-  margin: 0 0 4px;
-  font-size: 13px;
-  color: var(--soft);
-}
-
-.points-head b {
   font: 600 13px var(--mono);
 }
 
-h2.table-name {
-  font: 600 13px var(--mono);
-  color: var(--soft);
-  margin: 28px 0 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--rule);
+.table-name::after {
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+  content: "";
 }
 
-h2.table-name b {
+.table-name b {
   color: var(--ink);
 }
 
@@ -383,9 +582,9 @@ h2.table-name b {
 }
 
 .change .row-key {
-  font: 13px var(--mono);
-  color: var(--soft);
   margin: 0 0 4px;
+  color: var(--soft);
+  font: 13px var(--mono);
 }
 
 .change .row-key .seq {
@@ -404,10 +603,16 @@ td {
 
 td,
 th {
+  padding: 5px 20px 5px 0;
+  font-weight: 400;
   text-align: left;
   vertical-align: top;
-  padding: 3px 18px 3px 0;
-  font-weight: 400;
+}
+
+/* A row as it is and as it would be: two blocks, side by side, with the way from one to the other between. */
+.pairs {
+  border-collapse: separate;
+  border-spacing: 0 3px;
 }
 
 .pairs th {
@@ -416,31 +621,31 @@ th {
 }
 
 .pairs td {
-  overflow-wrap: anywhere;
   max-width: 44ch;
+  overflow-wrap: anywhere;
 }
 
 /* A value keeps room for a figure. On a narrow screen the table scrolls; "25.00" is never cut in two. */
 .pairs .was,
 .pairs .now {
   min-width: 11ch;
+  padding: 5px 10px;
+  border-radius: 7px;
 }
 
 .pairs .was {
-  color: var(--gone);
   background: var(--gone-wash);
-  padding-left: 6px;
+  color: var(--gone);
 }
 
 .pairs .now {
-  color: var(--came);
   background: var(--came-wash);
-  padding-left: 6px;
+  color: var(--came);
 }
 
 .pairs .arrow {
+  padding: 5px 10px;
   color: var(--soft);
-  padding: 3px 10px;
 }
 
 .same td,
@@ -449,8 +654,8 @@ th {
 }
 
 .scroll {
-  overflow-x: auto;
   margin: 0 0 18px;
+  overflow-x: auto;
 }
 
 .change .scroll {
@@ -458,16 +663,20 @@ th {
 }
 
 .grid th {
-  color: var(--soft);
+  padding-bottom: 7px;
   border-bottom: 1px solid var(--rule);
+  color: var(--soft);
+  font-size: 12px;
   white-space: nowrap;
 }
 
 .grid td {
-  max-width: 36ch;
   min-width: 7ch;
-  overflow-wrap: anywhere;
+  max-width: 36ch;
+  padding-top: 7px;
+  padding-bottom: 7px;
   border-bottom: 1px solid var(--faint);
+  overflow-wrap: anywhere;
 }
 
 .grid td.seq,
@@ -495,43 +704,81 @@ th {
   text-decoration: none;
 }
 
-.grid.context td,
-.grid.context th {
-  background: var(--faint);
+/* What the rows above point to. Set apart, and plainly not part of the change. */
+.points-to {
+  margin: 6px 0 24px;
+  padding: 12px 16px 6px;
+  border: 1px dashed var(--rule);
+  border-radius: 12px;
+}
+
+.points-to .scroll {
+  margin-bottom: 6px;
+}
+
+.points-head {
+  margin: 0 0 6px;
+  color: var(--soft);
+  font-size: 12.5px;
+}
+
+.points-head b {
+  color: var(--ink);
+  font: 600 12.5px var(--mono);
+}
+
+.grid.context td {
+  color: var(--ink);
 }
 
 .grid.context .absent-row td {
+  border-bottom-color: transparent;
   background: var(--gone-wash);
+  color: var(--gone);
+}
+
+.grid.context .absent-row td:first-child {
+  border-radius: 7px 0 0 7px;
+  padding-left: 8px;
+}
+
+.grid.context .absent-row td:last-child {
+  border-radius: 0 7px 7px 0;
 }
 
 .chip {
-  font: italic 12px var(--sans);
-  color: var(--soft);
-  text-decoration: none;
   display: inline-block;
+  color: var(--soft);
+  font: italic 12px var(--sans);
+  text-decoration: none;
 }
 
 .code {
-  font: 11px var(--mono);
-  color: var(--brass);
-  border: 1px solid currentColor;
-  border-radius: 3px;
-  padding: 0 3px;
-  margin: 0 1px;
-  text-decoration: none;
   display: inline-block;
+  margin: 0 1px;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  color: var(--turn);
+  font: 11px var(--mono);
+  text-decoration: none;
 }
 
 .link {
-  color: var(--brass);
+  color: var(--turn);
+  font-size: 13px;
   text-decoration: underline;
   text-underline-offset: 3px;
-  font-size: 13px;
 }
 
 .more {
   margin: 24px 0 0;
   color: var(--soft);
+}
+
+.more .link {
+  margin-left: 12px;
+  font-size: 15px;
 }
 
 button:disabled {
@@ -543,35 +790,13 @@ button:disabled {
   color: var(--soft);
 }
 
-.key input {
-  width: 9ch;
-  margin-left: 4px;
-  padding: 3px 8px;
-  font: 14px var(--mono);
-  color: inherit;
-  background: var(--sheet);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  vertical-align: baseline;
-}
-
-/* A field already has an edge. Focus colours that edge, and draws no second ring around it. */
-.key input:focus-visible,
-.key textarea:focus-visible {
-  outline-offset: -1px;
-  border-color: var(--brass);
-}
-
-.more .link {
-  margin-left: 12px;
-  font-size: 15px;
-}
+/* ---------------------------------------------------------------- the two keys */
 
 .keys {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  border-top: 1px solid var(--rule);
-  background: var(--paper);
+  background: var(--chrome);
+  color: var(--chrome-ink);
 }
 
 .keys[hidden] {
@@ -579,40 +804,71 @@ button:disabled {
 }
 
 .key {
-  padding: 14px 24px 16px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 14px;
+  align-content: start;
   min-width: 0;
+  padding: 15px 22px 17px;
 }
 
 .key + .key {
-  border-left: 1px solid var(--rule);
+  border-left: 1px solid var(--chrome-edge);
+}
+
+.key > * {
+  grid-column: 2;
+}
+
+/* A lock, seen from the front. The slot lies on its side once the key has been turned, and the quarter turn it made is drawn on the ring. */
+.key > .lock {
+  grid-column: 1;
+  grid-row: 1 / span 4;
+  width: 34px;
+  height: 34px;
+  margin-top: 1px;
+}
+
+.lock .ring {
+  fill: none;
+  stroke: var(--chrome-edge);
+  stroke-width: 2;
+}
+
+.lock .arc {
+  fill: none;
+  stroke: var(--turn-bright);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 19.7;
+  stroke-dashoffset: 19.7;
+}
+
+.lock .slot {
+  fill: var(--chrome-soft);
+  transform-box: view-box;
+  transform-origin: 16px 16px;
+}
+
+.lock.turned .arc {
+  stroke-dashoffset: 0;
+}
+
+.lock.turned .slot {
+  fill: var(--chrome-ink);
+  transform: rotate(90deg);
 }
 
 .key .label {
-  font: 600 11px var(--mono);
+  margin: 0 0 3px;
+  color: var(--chrome-soft);
+  font: 600 10.5px var(--mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--soft);
-  margin: 0 0 4px;
 }
 
 .key .label.turned {
-  color: var(--brass);
-}
-
-/* A key: hollow until it is turned. Two of them, side by side, are the whole state of a proposal. */
-.key .label::before {
-  content: "";
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  margin-right: 8px;
-  border: 1.5px solid currentColor;
-  border-radius: 50%;
-  vertical-align: -1px;
-}
-
-.key .label.turned::before {
-  background: currentColor;
+  color: var(--turn-bright);
 }
 
 .key p {
@@ -620,8 +876,8 @@ button:disabled {
 }
 
 .key .hash {
+  color: var(--chrome-soft);
   font: 12px var(--mono);
-  color: var(--soft);
   overflow-wrap: anywhere;
 }
 
@@ -629,35 +885,53 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px 14px;
-  margin-top: 8px;
+  gap: 10px 12px;
+  margin-top: 9px;
 }
 
 .act {
-  padding: 8px 16px;
-  border-radius: 6px;
-  border: 1px solid var(--rule);
-  background: var(--sheet);
+  padding: 7px 16px;
+  border: 1px solid var(--chrome-edge);
+  border-radius: 8px;
+  background: var(--chrome-raised);
+  color: var(--chrome-ink);
 }
 
 .act:hover:not(:disabled) {
-  border-color: var(--soft);
+  border-color: var(--chrome-soft);
 }
 
+/* The one that turns the key. */
 .act.turn {
-  background: var(--brass);
-  border-color: var(--brass);
-  color: var(--brass-ink);
+  border-color: var(--turn-bright);
+  background: var(--turn-bright);
+  color: var(--turn-bright-ink);
   font-weight: 600;
 }
 
 .act.turn:hover:not(:disabled) {
-  border-color: var(--ink);
+  border-color: var(--chrome-ink);
 }
 
 .act:disabled {
-  opacity: 0.55;
   cursor: default;
+  opacity: 0.55;
+}
+
+.key input,
+.key textarea {
+  border: 1px solid var(--chrome-edge);
+  border-radius: 8px;
+  background: var(--chrome-raised);
+  color: var(--chrome-ink);
+}
+
+.key input {
+  width: 9ch;
+  margin-left: 4px;
+  padding: 3px 8px;
+  font: 14px var(--mono);
+  vertical-align: baseline;
 }
 
 .key textarea {
@@ -668,10 +942,17 @@ button:disabled {
   margin-top: 8px;
   padding: 8px 10px;
   font: inherit;
-  color: inherit;
-  background: var(--sheet);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
+}
+
+.key textarea::placeholder {
+  color: var(--chrome-soft);
+}
+
+/* A field already has an edge. Focus colours that edge, and draws no second ring around it. */
+.key input:focus-visible,
+.key textarea:focus-visible {
+  outline-offset: -1px;
+  border-color: var(--turn-bright);
 }
 
 .key .ask {
@@ -679,8 +960,8 @@ button:disabled {
 }
 
 .key .refused {
-  color: var(--gone);
   margin-top: 8px;
+  color: var(--alarm-bright);
 }
 
 .said {
@@ -691,6 +972,8 @@ button:disabled {
   clip-path: inset(50%);
 }
 
+/* ---------------------------------------------------------------- a narrow screen */
+
 @media (max-width: 760px) {
   body {
     display: block;
@@ -698,9 +981,9 @@ button:disabled {
   }
 
   .top {
-    padding: 12px 16px;
     flex-wrap: wrap;
-    gap: 6px 16px;
+    gap: 8px 14px;
+    padding: 10px 14px;
   }
 
   .frame {
@@ -708,44 +991,73 @@ button:disabled {
   }
 
   .queue {
+    max-height: 30vh;
     border-right: 0;
     border-bottom: 1px solid var(--rule);
-    max-height: 30vh;
   }
 
   .queue .hint {
     display: none;
   }
 
-  /* The bar stays on the screen here, so it is kept short: the hash on one line. */
-  .key .hash {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
   .sheet {
     padding: 24px 16px 32px;
   }
 
+  .note {
+    font-size: 21px;
+  }
+
+  .extent li {
+    flex: 1 1 100%;
+  }
+
   .keys {
-    grid-template-columns: 1fr;
     position: sticky;
     bottom: 0;
+    grid-template-columns: 1fr;
   }
 
   .key {
-    padding: 12px 16px;
+    padding: 11px 16px 13px;
   }
 
   .key + .key {
+    border-top: 1px solid var(--chrome-edge);
     border-left: 0;
-    border-top: 1px solid var(--rule);
+  }
+
+  /* The bar stays on the screen here, so it is kept short: the hash on one line. */
+  .key .hash {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .sheet {
     scroll-behavior: smooth;
+  }
+
+  /* The key that has just been turned is seen to turn. */
+  .lock.turning .slot {
+    animation: turn 360ms cubic-bezier(0.3, 0.9, 0.3, 1);
+  }
+
+  .lock.turning .arc {
+    animation: sweep 360ms cubic-bezier(0.3, 0.9, 0.3, 1);
+  }
+}
+
+@keyframes turn {
+  from {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes sweep {
+  from {
+    stroke-dashoffset: 19.7;
   }
 }
