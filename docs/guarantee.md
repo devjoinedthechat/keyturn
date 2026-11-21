@@ -35,6 +35,19 @@ An agent cannot write or change a rule, or read what one says. It does learn the
 
 A rule decides only in a read committed transaction, PostgreSQL's default. In one that keeps a single view of the data, it could not count what it has already let through, so it refuses.
 
+## Rules that forbid
+
+The owner may also write a rule for changes that no one may approve.
+
+| When                        | What happens to a change the rule forbids                                 |
+| --------------------------- | ------------------------------------------------------------------------- |
+| It is proposed              | Refused, with the rule's reason. Nothing is recorded                      |
+| A person approves           | Refused. The records a condition reads may have changed while it waited   |
+| It is applied               | Nothing is written, whoever approved it, until the rule no longer forbids |
+| A rule would let it through | The rule that forbids is read first, and the other does not get to decide |
+
+A condition that cannot be worked out for a row, or that gives neither true nor false, forbids the row. Proposals for a table with such a rule are applied one after the other, so a running total in a condition holds against two applied at once.
+
 ## The record
 
 Every step of a proposal is an entry in `keyturn.audit`: opened, approved, approved by a rule, rejected, applied, stale or failed. The entry is written in the same transaction as the step, with the login that took it.
@@ -50,7 +63,7 @@ Every step of a proposal is an entry in `keyturn.audit`: opened, approved, appro
 | The agent's role                           | Write a protected table; approve or reject; apply a proposal that is not approved; change a proposal after it is made |
 | The agent's role, with the record          | Add, alter or remove an audit entry; read another agent's entries; write or read a rule                               |
 | The agent's own code, wrong or manipulated | Do anything the agent's role cannot. The guarantee does not depend on that code                                       |
-| An approver                                | Approve their own proposal; approve content other than what they name                                                 |
+| An approver                                | Approve their own proposal; approve content other than what they name; approve a change a rule forbids                |
 | Two connections at once                    | Apply a proposal twice; apply it against rows that have changed                                                       |
 
 ## Outside the claim

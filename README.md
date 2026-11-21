@@ -214,6 +214,23 @@ select keyturn.allow('close_tickets', 'tickets', array['update'], array['status'
 
 A condition may read other tables, so a rule can hold a limit kept elsewhere or a running total. A proposal goes through on rules only when every change in it is covered. The audit log then names the rule and its version, and records that no person decided. `keyturn doctor` lists every active rule.
 
+## Changes no one may approve
+
+The owner may also write a rule for changes that must never be made, whoever approves.
+
+```sql
+select keyturn.forbid('refund_within_payment', 'refunds', array['insert'],
+  $$(after ->> 'amount')::numeric > (select p.amount from public.payments p where p.id = (after ->> 'payment')::integer)$$,
+  'A refund is never more than the payment.');
+```
+
+```text
+agent   │ insert into proposal.refunds (payment, amount) values (7, 500)
+postgres│ ERROR: keyturn: forbidden by the rule refund_within_payment: A refund is never more than the payment. Nothing is recorded
+```
+
+The agent reads the reason and corrects itself, and the queue holds only what a person should look at. The rule is read again when a person approves and when the change is applied, so an approval does not lift it and a record that changed meanwhile is seen.
+
 ## The audit log
 
 Every step is an entry in `keyturn.audit`, written in the same transaction as the step, with the login that took it.
@@ -233,7 +250,8 @@ It reports an entry that was altered, one that is missing, and a proposal whose 
 | The agent's login, by any route to the table | The database owner and superusers        |
 | The agent's own code, wrong or manipulated   | An agent given the owner's credentials   |
 | An approver approving their own proposal     | An approver who approves without reading |
-| Two connections applying at once             | Effects outside the database             |
+| An approver approving what a rule forbids    | Effects outside the database             |
+| Two connections applying at once             |                                          |
 
 The claim is tested by attack. The suite connects as the agent and tries every way in. Against the tables: direct writes, `TRUNCATE`, `COPY`, `MERGE`, role switching, and temporary tables and types named like the server's own. Against the process: forged approvals, proposals altered after approval, double apply, apply against changed rows, and writing the audit log or the rules. Each must fail. It runs on PostgreSQL 15, 16, 17 and 18.
 

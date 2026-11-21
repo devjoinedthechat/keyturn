@@ -140,6 +140,12 @@ begin
       format('update keyturn.rules set active = false where name = %L', target.name);
   end loop;
 
+  for target in select f.name, f.relation::text as relation, f.operations, f.reason from keyturn.forbidden f where f.active order by 1 loop
+    return query select 'note', target.relation,
+      format('the rule %s forbids some %s, which no one may then approve: %s', target.name, array_to_string(target.operations, ', '), target.reason),
+      format('update keyturn.forbidden set active = false where name = %L', target.name);
+  end loop;
+
   for target in select distinct keyturn.name_of(r.relation) as name from keyturn.rules r join pg_class c on c.oid = r.relation
                  where r.active and c.relrowsecurity and r.operations && array['insert', 'update'] order by 1 loop
     return query select 'note', target.name,

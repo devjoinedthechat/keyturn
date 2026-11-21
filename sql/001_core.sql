@@ -261,6 +261,73 @@ begin
           written_by = session_user, written_at = clock_timestamp();
 end $$;
 
+-- Rules for changes that no one may approve. A rule in keyturn.rules takes the person out of
+-- a change that is small; a rule here takes the change out altogether. It is refused when it
+-- is proposed, with the rule's reason, so that the agent learns why and the queue does not
+-- fill with what must be turned down anyway. It is held against the rules again when a
+-- person approves and when it is applied: the records a condition reads may have changed
+-- while the proposal waited, and an approval does not lift a rule.
+--
+-- A condition is the same kind as in keyturn.rules: SQL over "before" and "after". A row it
+-- cannot be worked out for, or for which it gives neither true nor false, is refused.
+create table keyturn.forbidden (
+  name       text        primary key check (name ~ '^[a-z][a-z0-9_]{0,62}$'),
+  relation   regclass    not null,
+  operations text[]      not null check (operations <@ array['insert', 'update', 'delete'] and cardinality(operations) > 0),
+  condition  text        not null,
+  -- Said to whoever proposed the change, and shown to an approver.
+  reason     text        not null check (length(reason) between 1 and 500),
+  active     boolean     not null default true,
+  version    integer     not null default 1,
+  written_by name        not null default session_user,
+  written_at timestamptz not null default clock_timestamp()
+);
+create index forbidden_for on keyturn.forbidden (relation) where active;
+
+-- The first rule that forbids a change, as its name and reason, or null when none does.
+create function keyturn.forbidden_by(p_relation regclass, p_operation text, p_before jsonb, p_after jsonb) returns text
+  language plpgsql stable
+  set search_path = pg_catalog, pg_temp
+  as $$
+declare
+  rule  keyturn.forbidden;
+  holds boolean;
+begin
+  for rule in select * from keyturn.forbidden where active and relation = p_relation and p_operation = any (operations) order by name loop
+    begin
+      execute format('select (%s) from (select $1 as before, $2 as after) as change', rule.condition) into holds using p_before, p_after;
+    exception when others then
+      return format('%s (whose condition could not be worked out for this row): %s', rule.name, rule.reason);
+    end;
+    if holds is distinct from false then
+      return format('%s: %s', rule.name, rule.reason);
+    end if;
+  end loop;
+  return null;
+end $$;
+
+-- Writes a rule that forbids, or replaces one of the same name with the next version. For the tables' owner.
+create function keyturn.forbid(name text, relation regclass, operations text[], condition text, reason text) returns void
+  language plpgsql
+  set search_path = pg_catalog, pg_temp
+  as $$
+#variable_conflict use_column
+begin
+  if not exists (select from keyturn.protected p where p.relation = forbid.relation) then
+    raise exception 'keyturn: % is not a table under keyturn', forbid.relation;
+  end if;
+  if forbid.condition is null or forbid.reason is null then
+    raise exception 'keyturn: a rule that forbids has a condition and a reason';
+  end if;
+  -- Tried once on an empty row, so that a condition that is not SQL is refused when it is written and not when it is needed.
+  execute format('select (%s)::boolean from (select $1 as before, $2 as after) as change', forbid.condition) using '{}'::jsonb, '{}'::jsonb;
+  insert into keyturn.forbidden (name, relation, operations, condition, reason)
+    values (forbid.name, forbid.relation, forbid.operations, forbid.condition, forbid.reason)
+    on conflict (name) do update
+      set relation = excluded.relation, operations = excluded.operations, condition = excluded.condition, reason = excluded.reason,
+          active = true, version = keyturn.forbidden.version + 1, written_by = session_user, written_at = clock_timestamp();
+end $$;
+
 -- ---------------------------------------------------------------- how a row is written down
 
 -- A row is compared and hashed as JSON. JSON text depends on the session: a timestamp is
@@ -408,6 +475,7 @@ declare
   unknown   text;
   seq       integer := 0;
   proposal  uuid := gen_random_uuid();
+  forbidden text;
   -- Worked out once for a table and kept while the changes stay with it.
   kept_for  oid;
   reading   text;
@@ -514,6 +582,11 @@ begin
       raise exception 'keyturn: change %: the row % of % already has a change in this proposal', seq, key, target.relation;
     end if;
 
+    forbidden := keyturn.forbidden_by(target.relation, operation, before, after);
+    if forbidden is not null then
+      raise exception 'keyturn: change %: forbidden by the rule %. Nothing is recorded', seq, forbidden using errcode = 'insufficient_privilege';
+    end if;
+
     insert into keyturn.changes (proposal_id, seq, relation, relation_name, shape, operation, key, before, after, columns)
       values (proposal, seq, target.relation, keyturn.name_of(target.relation), target.shape, operation, key, before, after, columns);
   end loop;
@@ -599,6 +672,28 @@ create function keyturn.caller_is(p_group name) returns boolean
   set search_path = pg_catalog, pg_temp
   as $$ select pg_has_role(session_user, p_group, 'MEMBER') $$;
 
+-- The first change of a proposal that a rule forbids, with the rule's name and reason, or null.
+create function keyturn.forbidden_in(p_proposal_id uuid) returns text
+  language plpgsql stable
+  set search_path = pg_catalog, pg_temp
+  as $$
+declare
+  change    keyturn.changes;
+  forbidden text;
+begin
+  -- Most tables have no such rule, and a proposal may hold ten thousand changes.
+  if not exists (select from keyturn.forbidden f where f.active and f.relation in (select c.relation from keyturn.changes c where c.proposal_id = p_proposal_id)) then
+    return null;
+  end if;
+  for change in select * from keyturn.changes where proposal_id = p_proposal_id order by seq loop
+    forbidden := keyturn.forbidden_by(change.relation, change.operation, change.before, change.after);
+    if forbidden is not null then
+      return format('change %s is forbidden by the rule %s', change.seq, forbidden);
+    end if;
+  end loop;
+  return null;
+end $$;
+
 -- Approves a proposal. The approver says which content they are approving, by its hash. If
 -- that is not what the proposal holds, nothing is approved.
 create function keyturn.approve(p_proposal_id uuid, p_content_hash text) returns void
@@ -606,7 +701,8 @@ create function keyturn.approve(p_proposal_id uuid, p_content_hash text) returns
   set search_path = pg_catalog, pg_temp
   as $$
 declare
-  proposal keyturn.proposals;
+  proposal  keyturn.proposals;
+  forbidden text;
 begin
   if not keyturn.caller_is('keyturn_approver') then
     raise exception 'keyturn: % is not an approver', session_user using errcode = 'insufficient_privilege';
@@ -627,6 +723,12 @@ begin
   -- Held against what the proposal holds at this moment. From here on that hash is the proposal's.
   if p_content_hash is distinct from keyturn.hash_of(p_proposal_id) then
     raise exception 'keyturn: that is not the content of this proposal';
+  end if;
+  -- A change a rule forbids is not approved by anyone. It was held against the rules when it
+  -- was proposed; a rule written since, or a record changed since, is seen here.
+  forbidden := keyturn.forbidden_in(p_proposal_id);
+  if forbidden is not null then
+    raise exception 'keyturn: no one may approve this: %', forbidden using errcode = 'insufficient_privilege';
   end if;
   update keyturn.proposals set status = 'approved', content_hash = p_content_hash, decided_by = session_user, decided_at = clock_timestamp()
    where id = p_proposal_id;
@@ -686,6 +788,7 @@ declare
   result   jsonb;
   covered  jsonb;
   rule     keyturn.rules;
+  forbidden text;
 begin
   if not (keyturn.caller_is('keyturn_agent') or keyturn.caller_is('keyturn_approver')) then
     raise exception 'keyturn: % may not use keyturn', session_user using errcode = 'insufficient_privilege';
@@ -701,6 +804,22 @@ begin
   end if;
   if proposal.expires_at <= clock_timestamp() then
     raise exception 'keyturn: the proposal expired at %', proposal.expires_at;
+  end if;
+  -- A change a rule forbids is not written, whoever approved it and whenever. The rules for
+  -- these tables are held first and read after, as the rules below are, so that two proposals
+  -- held against one running total are taken one after the other.
+  perform from keyturn.forbidden f
+    where f.active and f.relation in (select c.relation from keyturn.changes c where c.proposal_id = p_proposal_id)
+    order by f.name for update;
+  if found then
+    if current_setting('transaction_isolation') <> 'read committed' then
+      raise exception 'keyturn: a table with a rule that forbids is written only in a read committed transaction; this one is %', current_setting('transaction_isolation')
+        using errcode = 'insufficient_privilege';
+    end if;
+    forbidden := keyturn.forbidden_in(p_proposal_id);
+    if forbidden is not null then
+      raise exception 'keyturn: nothing is written: %', forbidden using errcode = 'insufficient_privilege';
+    end if;
   end if;
   -- Nobody has decided. If the owner's rules cover every change in it, they decide, and it is on record that they did.
   if proposal.status = 'pending' then
@@ -917,7 +1036,7 @@ grant usage on schema keyturn to keyturn_agent, keyturn_approver;
 -- Both may read proposals and their changes. Neither may write them: only the functions do.
 grant select on keyturn.proposals, keyturn.changes, keyturn.protected, keyturn.audit to keyturn_agent, keyturn_approver;
 -- An approver may read the rules: they decide what never reaches an approver.
-grant select on keyturn.rules to keyturn_approver;
+grant select on keyturn.rules, keyturn.forbidden to keyturn_approver;
 grant execute on function keyturn.propose(jsonb, text, interval), keyturn.record_proposal(jsonb, text, interval) to keyturn_agent;
 grant execute on function keyturn.apply(uuid) to keyturn_agent, keyturn_approver;
 grant execute on function keyturn.approve(uuid, text), keyturn.reject(uuid, text) to keyturn_approver;

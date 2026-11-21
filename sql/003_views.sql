@@ -54,6 +54,7 @@ declare
   key       jsonb;
   columns   text[];
   seq       integer;
+  forbidden text;
 begin
   select * into target from keyturn.protected where view = tg_relid;
   if target.relation is null then
@@ -117,6 +118,11 @@ begin
   select coalesce(max(c.seq), 0) + 1 into seq from keyturn.changes c where c.proposal_id = proposal;
   if seq > 10000 then
     raise exception 'keyturn: a proposal holds at most 10000 changes, and this reaches more. Nothing is recorded. Narrow the statement, or make the change in parts';
+  end if;
+
+  forbidden := keyturn.forbidden_by(target.relation, operation, before, after);
+  if forbidden is not null then
+    raise exception 'keyturn: forbidden by the rule %. Nothing is recorded', forbidden using errcode = 'insufficient_privilege';
   end if;
 
   insert into keyturn.changes (proposal_id, seq, relation, relation_name, shape, operation, key, before, after, columns)
@@ -240,6 +246,7 @@ begin
     perform keyturn.audit_append(closed.id, 'stale', closed.outcome);
   end loop;
   delete from keyturn.rules where relation = p_relation;
+  delete from keyturn.forbidden where relation = p_relation;
   delete from keyturn.protected where relation = p_relation;
 end $$;
 

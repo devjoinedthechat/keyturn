@@ -134,6 +134,33 @@ const condition = `
                      and floor(extract(epoch from public.sim_now() - r.created_at) / 86400) <= 365))
   )`;
 
+/** The part of the policy no approval lifts, as a rule that forbids: a refund is refused unless all of this holds. */
+const never = `
+  not exists (
+    select 1
+      from public.payments p
+      join public.tenants n on n.id = p.tenant_id
+      join public.tickets t on t.id = after ->> 'ticket_id'
+     where p.id = after ->> 'payment_id'
+       and t.category = 'refund' and t.customer_id = p.customer_id
+       and (after ->> 'amount_cents')::integer > 0
+       and after ->> 'reason' in ('duplicate_charge', 'customer_request', 'service_credit')
+       and after ->> 'created_by' = 'agent'
+       and (after ->> 'amount_cents')::integer + coalesce((select sum(r.amount_cents) from public.refunds r where r.payment_id = p.id), 0) <= p.amount_cents
+       and (after ->> 'reason' = 'duplicate_charge'
+            or floor(extract(epoch from public.sim_now() - p.created_at) / 86400) <= n.refund_window_days)
+       and (after ->> 'reason' <> 'duplicate_charge'
+            or (p.status = 'succeeded' and exists (
+                  select 1 from public.payments q where q.invoice_id = p.invoice_id and q.status = 'succeeded'
+                     and (q.created_at, q.id) < (p.created_at, p.id))))
+       and not exists (select 1 from public.payments q where q.invoice_id = p.invoice_id and q.status = 'disputed')
+       and (after ->> 'reason' <> 'customer_request'
+            or not exists (
+                  select 1 from public.refunds r join public.payments q on q.id = r.payment_id
+                   where q.customer_id = p.customer_id and r.reason = 'customer_request'
+                     and floor(extract(epoch from public.sim_now() - r.created_at) / 86400) <= 365))
+  )`;
+
 type Ask = { ticketId: string; paymentId: string; amountCents: number; reason: string };
 type World = { payments: Payment[]; refunds: (Refund & { ticketId?: string })[] };
 
@@ -231,9 +258,15 @@ const asChange = (ask: Ask) => ({
   },
 });
 
-/** Proposes and applies as the agent. "alone" if the rule let it through, "person" if it waits. */
-async function ask(request: Ask, client: pg.Client = agent): Promise<"alone" | "person"> {
-  const proposed = await propose(client, [asChange(request)]);
+/** Proposes and applies as the agent: "never" if it is refused outright, "alone" if a rule lets it through, "person" if it waits. */
+async function ask(request: Ask, client: pg.Client = agent): Promise<"alone" | "person" | "never"> {
+  let proposed: Awaited<ReturnType<typeof propose>>;
+  try {
+    proposed = await propose(client, [asChange(request)]);
+  } catch (error) {
+    expect((error as Error).message).toContain("forbidden by the rule refund_never: ");
+    return "never";
+  }
   return decide(client, proposed.proposal_id);
 }
 
@@ -291,6 +324,11 @@ beforeAll(async () => {
        array['ticket_id', 'payment_id', 'amount_cents', 'reason', 'created_by'],
        max_rows => 1, condition => $1, per_hour => 100000)`,
     [condition],
+  );
+  await owner.query(
+    `select keyturn.forbid('refund_never', 'refunds', array['insert'], $1,
+       'The refund policy does not allow this refund, with or without approval.')`,
+    [never],
   );
 }, 120_000);
 
@@ -354,7 +392,7 @@ describe("a refund policy written as one rule", () => {
             const got = await ask(request);
             tally.asked += 1;
             tally[wanted] += 1;
-            if ((wanted === "alone") !== (got === "alone")) {
+            if (wanted !== got) {
               tally.disagreements.push(
                 `${scenario.id} ${payment.id} ${reason} ${amountCents}: policy ${wanted}, rule ${got}`,
               );
