@@ -293,6 +293,17 @@ describe("a move that would lose something of the owner's", () => {
     expect(await said()).toContain("keyturn_test_log");
     await admin.query("drop publication keyturn_test_log");
 
+    // Default privileges give a role select on every new table, and give it again. They do
+    // not give it the schema, or a function: those were given by hand, and would be lost.
+    await owner.query("alter default privileges grant select on tables to keyturn_test_auditor");
+    await owner.query("grant usage on schema keyturn to keyturn_test_auditor");
+    await owner.query("grant execute on function keyturn.audit_head() to keyturn_test_auditor");
+    expect(await said()).toContain("given by hand to keyturn_test_auditor");
+    await owner.query("revoke execute on function keyturn.audit_head() from keyturn_test_auditor");
+    expect(await said()).toContain("given by hand to keyturn_test_auditor");
+    await owner.query("revoke usage on schema keyturn from keyturn_test_auditor");
+    await owner.query("grant select on keyturn.audit to keyturn_test_auditor");
+
     // An agent cannot stand in the way with something of its own session, or write into the refusal.
     const agent = await database.as(logins.agent);
     await agent.query(
@@ -301,6 +312,15 @@ describe("a move that would lose something of the owner's", () => {
 
     expect(await installed(owner)).toBe("0.1.0");
     expect(await upgrade(owner)).toMatchObject({ from: "0.1.0" });
+    expect(
+      (
+        await owner.query(
+          "select has_table_privilege('keyturn_test_auditor', 'keyturn.audit', 'select') as again",
+        )
+      ).rows[0].again,
+    ).toBe(true);
+    await owner.query("alter default privileges revoke select on tables from keyturn_test_auditor");
+    await admin.query("drop owned by keyturn_test_auditor");
     await admin.query("drop role keyturn_test_auditor");
     await database.close();
   });

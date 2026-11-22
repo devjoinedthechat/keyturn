@@ -145,7 +145,7 @@ keyturn verify-archive keyturn-2025.jsonl
 - A mark stays in `keyturn.archived`: when, by whom, how many, the digest, the hash of the file, and the value of the whole log before and after. `keyturn verify-audit` holds for what is left.
 - `keyturn verify-archive` needs no database. It reports a line altered, added, removed or moved; an entry changed; rows that are not the rows an approval named; a file cut short.
 - What a rule let through in the last hour stays in the database until the hour is out, whatever date is given. A rule counts its hourly limit from the log.
-- If another connection has a proposal open, nothing is removed and the command says so. Run it again.
+- It waits up to five seconds for what is in the way. A vacuum of these tables gives way to it. A connection that holds a proposal open longer does not: then nothing is removed and the command says so. Run it again.
 - An entry leaves the log only while a removal that has left its mark is at work. No setting opens the log, for the owner or anyone else.
 - `keyturn verify-archive <file> --hash <hash>` also checks that the file is the one that was written. The hash is printed when the file is written and kept in `keyturn.archived`. Without it, the check shows the file agrees with itself, which a file rewritten with care also does.
 - The file's own hash is what tells an altered file from the one that was written, so keep it apart from the file. The command prints it, and the mark has it.
@@ -211,7 +211,7 @@ keyturn upgrade
 - A table that has been dropped since it was put under Keyturn is left out. Its proposals stay on record.
 - A table whose columns changed since it was protected is still marked as changed afterwards. Protect it again, as before.
 - It is refused if something of your own hangs on Keyturn's tables or functions: a view of the audit log, a foreign key to a proposal, a row-level policy that calls `keyturn.caller_is`. They would be dropped with what they hang on. Each is named. Drop them, upgrade, and make them again.
-- It is refused if a right on Keyturn's own tables or functions was given by hand to another role, which would be lost. Revoke it, upgrade, and grant it again.
+- It is refused if a right on Keyturn's own tables or functions was given by hand to another role, which would be lost. Revoke it, upgrade, and grant it again. A right your default privileges give on every new object of that kind is given again, and is not counted.
 - The rights of the three Keyturn roles come out as a fresh install gives them. If you took one away or added one by hand, do it again afterwards.
 - Anything you added inside the `keyturn` schema itself, such as a trigger, a policy, a column or a comment on its tables, is replaced with the rest. Keep your own things outside it.
 - Run `keyturn doctor` afterwards.

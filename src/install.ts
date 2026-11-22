@@ -227,23 +227,29 @@ export async function upgrade(db: Queryable): Promise<{ from: string; to: string
       await db.query(
         `select distinct case when given.grantee = 0 then 'everyone (public)' else pg_get_userbyid(given.grantee)::text end as role
            from (
-           select (aclexplode(nspacl)).grantee from pg_namespace where ${own}
+           select 'n'::"char" as kind, (aclexplode(nspacl)).* from pg_namespace where ${own}
            union all
-           select (aclexplode(c.relacl)).grantee from pg_class c
+           select case when c.relkind = 'S' then 'S' else 'r' end::"char", (aclexplode(c.relacl)).* from pg_class c
             where c.relnamespace in (select oid from pg_namespace where ${own})
            union all
-           select (aclexplode(a.attacl)).grantee from pg_attribute a join pg_class c on c.oid = a.attrelid
+           -- A column's own rights never come from default privileges.
+           select null::"char", (aclexplode(a.attacl)).* from pg_attribute a join pg_class c on c.oid = a.attrelid
             where c.relnamespace in (select oid from pg_namespace where ${own})
            union all
-           select (aclexplode(p.proacl)).grantee from pg_proc p
+           select 'f'::"char", (aclexplode(p.proacl)).* from pg_proc p
             where p.pronamespace in (select oid from pg_namespace where ${own})
          ) as given
           where (given.grantee = 0 or pg_get_userbyid(given.grantee)::text <> all ($1::text[] || current_user::text))
-            -- A role the owner's default privileges give rights to gets them on every new
-            -- table, and will again: nothing of theirs is lost.
-            and given.grantee not in (select (aclexplode(defaclacl)).grantee from pg_default_acl
-                                       where defaclrole = (select oid from pg_roles where rolname = current_user)
-                                         and defaclnamespace = 0)
+            -- A right the owner's default privileges give on every new object of its kind is
+            -- given again by the new version: that one is not lost. Only that exact right, on
+            -- that kind of object.
+            and not exists (
+              select from pg_default_acl d, lateral aclexplode(d.defaclacl) as again
+               where d.defaclrole = (select oid from pg_roles where rolname = current_user)
+                 and d.defaclnamespace = 0
+                 and d.defaclobjtype = given.kind
+                 and again.grantee = given.grantee
+                 and again.privilege_type = given.privilege_type)
           order by 1`,
         [roles],
       )

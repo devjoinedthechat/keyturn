@@ -88,6 +88,10 @@ end $$;
 create function keyturn.prune(p_before timestamptz, p_digest text, p_file text default null) returns jsonb
   language plpgsql
   set search_path = pg_catalog, pg_temp
+  -- Waits a few seconds for what is in the way, and no longer. A vacuum of these tables gives
+  -- way to a removal that waits, so the wait is what lets one through; a transaction somebody
+  -- left open does not, and the removal stops rather than hold everyone behind it.
+  set lock_timeout = '5s'
   as $$
 declare
   found   record;
@@ -99,12 +103,11 @@ begin
   if p_before is null or p_before > clock_timestamp() then
     raise exception 'keyturn: records are put away up to a time that has passed';
   end if;
-  -- Nothing is proposed, decided or applied while this looks and removes. It does not queue
-  -- behind a transaction somebody left open, holding everyone after it up: it stops.
+  -- Nothing is proposed, decided or applied while this looks and removes.
   begin
-    lock table keyturn.proposals, keyturn.audit in share row exclusive mode nowait;
+    lock table keyturn.proposals, keyturn.audit in share row exclusive mode;
   exception when lock_not_available then
-    raise exception 'keyturn: the proposals are in use by another connection. Nothing is removed. Run it again'
+    raise exception 'keyturn: the proposals are in use by another connection, or a maintenance command such as vacuum is working on them. Nothing is removed. Run it again'
       using errcode = 'lock_not_available';
   end;
   -- Looked up once. What is counted, what is held against the digest and what is removed are
@@ -121,7 +124,7 @@ begin
   -- Somebody may be holding one of these proposals in a transaction of their own. This does
   -- not wait for them with the tables locked: it stops, and is run again.
   begin
-    perform from keyturn.proposals p where p.id = any (gone) order by p.id for update nowait;
+    perform from keyturn.proposals p where p.id = any (gone) order by p.id for update;
   exception when lock_not_available then
     raise exception 'keyturn: a proposal that would be removed is in use by another connection. Nothing is removed. Run it again'
       using errcode = 'lock_not_available';

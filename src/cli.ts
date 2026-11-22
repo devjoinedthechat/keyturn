@@ -415,9 +415,11 @@ export async function run(argv: string[], io: Io): Promise<number> {
           },
           failed("a proposal could not be read"),
         );
-        const announced = (await db.query("select announce from keyturn.settings")).rows[0] as
-          | { announce: boolean }
-          | undefined;
+        const announced = (
+          await db.query(
+            "select announce from keyturn.settings where to_regclass('keyturn.settings') is not null",
+          )
+        ).rows[0] as { announce: boolean } | undefined;
         if (announced?.announce === false) {
           io.err(
             "The owner has turned announcements off in this database (keyturn.settings), so nothing will be heard.",

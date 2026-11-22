@@ -43,9 +43,34 @@ export async function watch(
   // Entries get their numbers before their transactions are kept, so a lower number can
   // appear after a higher one. Each look therefore goes back over the last numbers too, and
   // the ones already seen are remembered.
+  //
+  // Where the log has got to is asked of the database, not worked out from the entries this
+  // login may read. An agent reads only its own, and would otherwise look from the beginning.
+  const counted = (
+    (await db.query("select to_regprocedure('keyturn.last_entry()') is not null as there"))
+      .rows[0] as {
+      there: boolean;
+    }
+  ).there;
+  const last = async () =>
+    BigInt(
+      (
+        (
+          await db.query(
+            counted
+              ? "select keyturn.last_entry()::text as last"
+              : "select coalesce(max(seq), 0)::text as last from keyturn.audit",
+          )
+        ).rows[0] as { last: string }
+      ).last,
+    );
   const seen = new Set<bigint>();
   let highest = 0n;
   const look = async (silent: boolean) => {
+    const reached = await last();
+    if (silent) {
+      highest = reached;
+    }
     const from = highest > BEHIND ? highest - BEHIND : 0n;
     const { rows } = await db.query(
       "select seq::text as seq, proposal_id::text as proposal, event, actor::text as actor from keyturn.audit where seq > $1 order by seq",
@@ -81,6 +106,9 @@ export async function watch(
           extent: await keyturn.extent(proposal.id),
         },
       });
+    }
+    if (reached > highest) {
+      highest = reached;
     }
     for (const seq of seen) {
       if (seq + BEHIND < highest) {

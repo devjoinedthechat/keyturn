@@ -177,12 +177,13 @@ describe("putting old records away", () => {
     );
     expect(await head()).toEqual(before);
 
-    // Somebody has one of the proposals open. The removal does not wait for them: it stops.
+    // Somebody has one of the proposals open. The removal waits a few seconds, then stops.
     const other = await database.as(logins.owner);
     await other.query("begin");
     await other.query("select from keyturn.proposals where id = $1 for update", [made.rejected]);
     const held = await refusal(prune(owner, moment, written));
-    expect(held?.message).toContain("in use by another connection. Nothing is removed");
+    expect(held?.message).toContain("in use by another connection");
+    expect(held?.message).toContain("Nothing is removed");
     await other.query("rollback");
     expect(await head()).toEqual(before);
 
@@ -224,6 +225,15 @@ describe("putting old records away", () => {
     await alice.query("select keyturn.reject($1)", [made.waiting]);
     expect((await apply(agent, made.approved as string)).status).toBe("applied");
     expect((await alice.query("select * from keyturn.verify_audit()")).rows).toEqual([]);
+    // What is in the way for a moment, as a vacuum of the log is, it waits for.
+    await other.query("begin");
+    await other.query("lock table keyturn.audit in share update exclusive mode");
+    setTimeout(() => void other.query("rollback"), 500);
+    expect(
+      await prune(owner, new Date("2000-01-01"), {
+        digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      }),
+    ).toMatchObject({ proposals: 0 });
   });
 
   test("the log is still closed to everything else", async () => {

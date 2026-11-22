@@ -181,6 +181,46 @@ describe("keyturn watch", () => {
     ]);
   });
 
+  test("an agent's watch looks from where the log has got to, not from the beginning", async () => {
+    const owner = await database.as(logins.owner);
+    // A long log, none of it this agent's.
+    const theirs = await propose(agent, [update(80)]);
+    await owner.query(
+      "select keyturn.audit_append($1, 'opened', '{}') from generate_series(1, 3000)",
+      [theirs.proposal_id],
+    );
+    const looked: string[] = [];
+    const watcher = await database.as(logins.otherAgent);
+    const { watch } = await import("../src/watch.ts");
+    const told: string[] = [];
+    await watch(
+      {
+        query: (text: string, values?: unknown[]) => {
+          if (text.includes("from keyturn.audit where seq >")) {
+            looked.push(String(values?.[0]));
+          }
+          return watcher.query(text, values);
+        },
+        heard: (listener) =>
+          watcher.on("notification", (said) => listener(said.channel, said.payload ?? "")),
+      },
+      (one) => {
+        told.push(one.event);
+      },
+    );
+    const last = Number(
+      (await owner.query("select max(seq) as last from keyturn.audit")).rows[0].last,
+    );
+    await agent.query("notify keyturn, 'x'");
+    await until(() => looked.length >= 2);
+    // Every look starts within a short reach of the end of the log, though this agent has no entry in it.
+    for (const from of looked) {
+      expect(Number(from)).toBeGreaterThan(last - 2001);
+    }
+    expect(last).toBeGreaterThan(0);
+    expect(told).toEqual([]);
+  });
+
   test("gives Slack a note as text, never as a link or a call to a channel", async () => {
     received.length = 0;
     const port = (server.address() as AddressInfo).port;

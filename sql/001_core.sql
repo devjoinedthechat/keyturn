@@ -1111,6 +1111,14 @@ create function keyturn.audit_head() returns table (entries bigint, head text)
     select count(*), encode(sha256(convert_to(coalesce(string_agg(hash, '' order by seq), ''), 'UTF8')), 'hex') from keyturn.audit
   $$;
 
+-- The number of the latest entry, and nothing else of the log. A watcher looks from here,
+-- an agent too, who may read only its own entries. That something happened is no secret:
+-- every step is announced to any login.
+create function keyturn.last_entry() returns bigint
+  language sql stable security definer
+  set search_path = pg_catalog, pg_temp
+  as $$ select coalesce(max(seq), 0) from keyturn.audit $$;
+
 -- ---------------------------------------------------------------- who may see what
 
 -- A proposal holds rows of the tables it would change. An agent reads the proposals it made
@@ -1149,6 +1157,7 @@ grant select on keyturn.proposals, keyturn.changes, keyturn.protected, keyturn.a
 grant select on keyturn.rules, keyturn.forbidden to keyturn_approver;
 -- Whether steps are said aloud is no secret: a watcher has to know it will hear nothing.
 grant select on keyturn.settings to keyturn_agent, keyturn_approver;
+grant execute on function keyturn.last_entry() to keyturn_agent, keyturn_approver;
 grant execute on function keyturn.propose(jsonb, text, interval), keyturn.record_proposal(jsonb, text, interval) to keyturn_agent;
 grant execute on function keyturn.apply(uuid) to keyturn_agent, keyturn_approver;
 grant execute on function keyturn.approve(uuid, text), keyturn.reject(uuid, text) to keyturn_approver;
