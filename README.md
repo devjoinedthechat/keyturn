@@ -305,6 +305,7 @@ The time that matters is the person's. Keyturn is for changes worth a person's l
 - **A proposal is applied in a read committed transaction.** That is PostgreSQL's default. In a transaction that keeps one view of the data, apply is refused.
 - **A view holds on to its table's columns.** Before dropping or retyping a column, run `select keyturn.drop_view('orders')`, then `select keyturn.protect('orders')` after.
 - **The table's triggers, defaults and cascades run at apply.** A row that comes out different from what was approved fails the apply, unless the table was protected with `--loose`.
+- **Each step is announced on the channel `keyturn`, and PostgreSQL refuses `PREPARE TRANSACTION` after an announcement.** If you use two-phase commit, turn it off as the owner: `update keyturn.settings set announce = false`. `keyturn watch` then hears nothing.
 - **Installing needs three roles.** If the installing login may not create roles, `keyturn install` prints the three statements for an administrator.
 
 [examples/refund-desk](examples/refund-desk/README.md) is a support agent on Keyturn with a real model in the loop: eighteen tickets, twelve of them attempts at abuse, judged by what ended up in the database. [docs/operating.md](docs/operating.md) covers installing, moving to a later version, rules, the audit log and removal. [docs/support.md](docs/support.md) says what happens with each kind of table, column and statement, each line held by a test.
